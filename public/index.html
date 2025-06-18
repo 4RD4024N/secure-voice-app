@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Güvenli Sesli Sohbet</title>
+  <style>
+    body {
+      font-family: sans-serif;
+      background: #f4f4f4;
+      padding: 20px;
+      max-width: 600px;
+      margin: auto;
+    }
+    h2 { color: #007bff; }
+    input, button {
+      padding: 10px;
+      margin: 5px 0;
+      width: 100%;
+      box-sizing: border-box;
+    }
+    button {
+      background: #007bff;
+      color: white;
+      border: none;
+      cursor: pointer;
+    }
+    #users {
+      margin-top: 20px;
+      background: #fff;
+      padding: 10px;
+      border-radius: 4px;
+      white-space: pre-line;
+    }
+  </style>
+</head>
+<body>
+  <h2>Güvenli Sesli Sohbet</h2>
+
+  <input id="roomId" placeholder="Oda ID gir (örnek: dostlar)" />
+  <button onclick="createRoom()">Oda Oluştur</button>
+  <button onclick="joinRoom()">Odaya Katıl</button>
+  <p id="status"></p>
+  <p><b>Paylaş:</b> <span id="shareLink"></span></p>
+
+  <div id="users"><b>Bağlı Kullanıcılar:</b></div>
+
+  <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
+  <script src="https://unpkg.com/simple-peer@9.11.1/simplepeer.min.js"></script>
+  <script>
+    const socket = io();
+    let peers = {};
+    let localStream;
+    let currentRoom = "";
+
+    function setStatus(msg) {
+      document.getElementById("status").innerText = msg;
+    }
+
+    function createRoom() {
+      const roomId = document.getElementById("roomId").value;
+      if (!roomId) return setStatus("Lütfen bir oda ID gir.");
+      socket.emit("create-room", roomId);
+    }
+
+    function joinRoom() {
+      const roomId = document.getElementById("roomId").value;
+      if (!roomId) return setStatus("Lütfen bir oda ID gir.");
+      socket.emit("join-room", roomId);
+    }
+
+    socket.on("roomExists", () => setStatus("❌ Bu oda zaten var!"));
+    socket.on("roomNotFound", () => setStatus("❌ Böyle bir oda yok."));
+    socket.on("roomFull", () => setStatus("❌ Oda dolu (5 kişi sınırı)."));
+
+    socket.on("roomCreated", (roomId) => {
+      setStatus("✅ Oda oluşturuldu.");
+      currentRoom = roomId;
+      document.getElementById("shareLink").innerText = window.location.origin + "?room=" + roomId;
+    });
+
+    socket.on("joinedRoom", async (roomId) => {
+      setStatus("✅ Odaya katıldın.");
+      currentRoom = roomId;
+      document.getElementById("shareLink").innerText = window.location.origin + "?room=" + roomId;
+      localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+
+      socket.on("user-joined", (id) => {
+        const peer = createPeer(id);
+        peers[id] = peer;
+        localStream.getTracks().forEach(track => peer.addTrack(track, localStream));
+      });
+
+      socket.on("signal", ({ from, data }) => {
+        if (!peers[from]) {
+          const peer = createPeer(from, false);
+          peers[from] = peer;
+        }
+        peers[from].signal(data);
+      });
+
+      socket.on("user-left", (id) => {
+        if (peers[id]) {
+          peers[id].destroy();
+          delete peers[id];
+        }
+      });
+    });
+
+    function createPeer(id, initiator = true) {
+      const peer = new SimplePeer({
+        initiator,
+        trickle: false,
+        stream: localStream,
+        config: {
+          iceServers: [{ urls: "stun:stun.l.google.com:19302" }]
+        }
+      });
+
+      peer.on("signal", data => {
+        socket.emit("signal", { to: id, data });
+      });
+
+      peer.on("stream", stream => {
+        // KENDİ SESİNİ YENİDEN DUYMAMAK İÇİN GEREKLİ FİLTRE
+        if (id === socket.id) return;
+
+        const audio = document.createElement("audio");
+        audio.srcObject = stream;
+        audio.autoplay = true;
+        audio.controls = false;
+        document.body.appendChild(audio);
+      });
+
+      peer.on("connect", () => {
+        const list = document.getElementById("users");
+        list.innerText += `\n✅ Bağlı: ${id}`;
+      });
+
+      return peer;
+    }
+a
+    window.onload = () => {
+      const params = new URLSearchParams(window.location.search);
+      const room = params.get("room");
+      if (room) {
+        document.getElementById("roomId").value = room;
+        joinRoom();
+      }
+    };
+  </script>
+</body>
+</html>
