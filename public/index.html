@@ -131,7 +131,14 @@
     async function ensureMic() {
       if (localStream) return localStream;
       try {
-        localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        localStream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            noiseSuppression: true,
+            echoCancellation: true,
+            autoGainControl: true,
+            sampleRate: 48000
+          }
+        });
         setupAnalyzer(localStream);
         return localStream;
       } catch (e) {
