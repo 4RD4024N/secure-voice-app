@@ -67,7 +67,19 @@ io.on("connection", (socket) => {
 
     if (!socket.disconnectListenerAttached) {
       socket.on("disconnect", () => {
-        socket.to(roomId).emit("user-left", socket.id);
+        // Log the disconnection of the socket
+        console.log(`User disconnected: ${socket.id}`);
+
+        // On disconnect, determine which rooms the socket was in (exclude its own socket id)
+        const leftRooms = [...socket.rooms].filter(r => r !== socket.id);
+        if (leftRooms.length === 0) {
+          console.log(`Socket ${socket.id} disconnected (not in any room)`);
+        } else {
+          leftRooms.forEach(room => {
+            console.log(`Socket ${socket.id} left room ${room}`);
+            socket.to(room).emit("user-left", socket.id);
+          });
+        }
       });
       socket.disconnectListenerAttached = true;
     }

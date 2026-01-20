@@ -1,95 +1,213 @@
 <!DOCTYPE html>
 <html>
 <head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>Güvenli Sesli Sohbet</title>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600&display=swap" rel="stylesheet">
   <style>
-    body {
-      font-family: sans-serif;
-      background: #f4f4f4;
-      padding: 20px;
-      max-width: 600px;
-      margin: auto;
+    :root{
+      --bg:#0f1724;
+      --card:#0b1220;
+      --accent:#6ee7b7;
+      --muted:#94a3b8;
+      --glass: rgba(255,255,255,0.03);
     }
-    h2 { color: #007bff; }
-    input, button {
-      padding: 10px;
-      margin: 5px 0;
-      width: 100%;
-      box-sizing: border-box;
+    *{box-sizing:border-box}
+    body{
+      margin:0;
+      min-height:100vh;
+      font-family:Inter, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial;
+      background: linear-gradient(180deg,#071023 0%, #071428 60%);
+      color:#e6eef8;
+      display:flex;
+      align-items:center;
+      justify-content:center;
+      padding:28px;
     }
-    button {
-      background: #007bff;
-      color: white;
-      border: none;
-      cursor: pointer;
+    .app{
+      width:100%;
+      max-width:820px;
+      background:linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0.01));
+      border-radius:12px;
+      padding:20px;
+      box-shadow:0 6px 30px rgba(2,6,23,0.6);
+      border: 1px solid rgba(255,255,255,0.03);
     }
-    #users {
-      margin-top: 20px;
-      background: #fff;
-      padding: 10px;
-      border-radius: 4px;
-      white-space: pre-line;
-    }
+    header{display:flex;align-items:center;justify-content:space-between;margin-bottom:18px}
+    h2{margin:0;font-weight:600;color:var(--accent)}
+    .controls{display:grid;grid-template-columns:1fr 220px;gap:12px;align-items:start}
+    .card{background:var(--card);padding:14px;border-radius:10px}
+    input[type="text"], button{width:100%;padding:10px;border-radius:8px;border:1px solid rgba(255,255,255,0.04);background:transparent;color:inherit}
+    button{background:var(--accent);color:#052018;border:none;font-weight:600;cursor:pointer}
+    .right{display:flex;flex-direction:column;gap:8px}
+    #users{margin-top:12px;background:var(--glass);padding:10px;border-radius:8px;min-height:64px;white-space:pre-line;color:var(--muted)}
+    .mic-panel{display:flex;flex-direction:column;gap:8px}
+    .meter{background:#0b1320;border-radius:6px;height:12px;overflow:hidden}
+    .meter > .level{height:100%;width:0%;background:linear-gradient(90deg,var(--accent),#22c1c3)}
+    .mic-row{display:flex;gap:8px;align-items:center}
+    #micLevel{appearance:none;width:100%}
+    #micLevel::-webkit-slider-thumb{appearance:none;width:14px;height:14px;border-radius:50%;background:var(--accent);box-shadow:0 0 8px rgba(110,231,183,0.3)}
+    .remote-audios{display:flex;flex-direction:column;gap:6px;margin-top:10px}
+    audio{outline:none}
+    .muted{opacity:0.6}
+    footer{margin-top:14px;color:var(--muted);font-size:13px}
+    @media (max-width:700px){.controls{grid-template-columns:1fr}}
   </style>
 </head>
 <body>
-  <h2>Güvenli Sesli Sohbet</h2>
+  <div class="app">
+    <header>
+      <h2>Güvenli Sesli Sohbet</h2>
+      <div style="color:var(--muted);font-size:13px">Simple WebRTC + Signaling</div>
+    </header>
 
-  <input id="roomId" placeholder="Oda ID gir (örnek: dostlar)" />
-  <button onclick="createRoom()">Oda Oluştur</button>
-  <button onclick="joinRoom()">Odaya Katıl</button>
-  <p id="status"></p>
-  <p><b>Paylaş:</b> <span id="shareLink"></span></p>
+    <div class="controls">
+      <div class="card">
+        <input id="roomId" type="text" placeholder="Oda ID gir (örnek: dostlar)" />
+        <div style="display:flex;gap:8px;margin-top:8px">
+          <button id="createBtn">Oda Oluştur</button>
+          <button id="joinBtn">Odaya Katıl</button>
+        </div>
+        <p id="status" style="margin-top:10px;color:var(--muted)"></p>
+        <p style="margin:6px 0"><b>Paylaş:</b> <span id="shareLink" class="muted"></span></p>
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-top:8px">
+          <div style="font-weight:600">Oluşturulan Odalar</div>
+          <button id="refreshRooms" style="background:transparent;color:var(--accent);border:1px solid rgba(110,231,183,0.08);padding:6px 8px;font-size:13px">Yenile</button>
+        </div>
+        <div id="roomsList" style="margin-top:8px;background:rgba(255,255,255,0.01);padding:8px;border-radius:8px;min-height:48px;color:var(--muted)">Yükleniyor...</div>
+        <div id="users"><b>Bağlı Kullanıcılar:</b></div>
+        <div class="remote-audios" id="remoteAudios"></div>
+      </div>
 
-  <div id="users"><b>Bağlı Kullanıcılar:</b></div>
+      <div class="right">
+        <div class="card mic-panel">
+          <div style="display:flex;justify-content:space-between;align-items:center">
+            <div style="font-weight:600">Mikrofon</div>
+            <div id="micState" style="font-size:13px;color:var(--muted)">Durum: Kapalı</div>
+          </div>
+          <div class="mic-row">
+            <input id="micLevel" type="range" min="0" max="100" value="0" disabled />
+          </div>
+          <div class="meter" aria-hidden="true"><div class="level" id="levelBar"></div></div>
+          <div style="display:flex;gap:8px;margin-top:6px">
+            <button id="muteBtn">Mikrofonu Aç</button>
+            <button id="ngrokHelp" style="background:transparent;color:var(--accent);border:1px solid rgba(110,231,183,0.12)">Bağlantı Yardım</button>
+          </div>
+        </div>
+        <footer>Not: Tarayıcı mikrofon izinleri gereklidir.</footer>
+      </div>
+    </div>
+  </div>
 
   <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
   <script src="https://unpkg.com/simple-peer@9.11.1/simplepeer.min.js"></script>
   <script>
     const socket = io();
     let peers = {};
-    let localStream;
+    let localStream = null;
     let currentRoom = "";
+    let audioCtx = null;
+    let analyser = null;
+    let dataArray = null;
+    let rafId = null;
+    let isMicOn = false;
 
-    function setStatus(msg) {
-      document.getElementById("status").innerText = msg;
+    const createBtn = document.getElementById('createBtn');
+    const joinBtn = document.getElementById('joinBtn');
+    const muteBtn = document.getElementById('muteBtn');
+    const micLevel = document.getElementById('micLevel');
+    const levelBar = document.getElementById('levelBar');
+    const micState = document.getElementById('micState');
+
+    createBtn.onclick = createRoom;
+    joinBtn.onclick = joinRoom;
+    muteBtn.onclick = toggleMic;
+    document.getElementById('refreshRooms').onclick = requestRooms;
+
+    function setStatus(msg) { document.getElementById('status').innerText = msg; }
+
+    async function ensureMic() {
+      if (localStream) return localStream;
+      try {
+        localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        setupAnalyzer(localStream);
+        return localStream;
+      } catch (e) {
+        setStatus('Mikrofon erişimi reddedildi veya bulunamadı.');
+        throw e;
+      }
     }
 
     function createRoom() {
-      const roomId = document.getElementById("roomId").value;
-      if (!roomId) return setStatus("Lütfen bir oda ID gir.");
-      socket.emit("create-room", roomId);
+      const roomId = document.getElementById('roomId').value;
+      if (!roomId) return setStatus('Lütfen bir oda ID gir.');
+      socket.emit('create-room', roomId);
     }
 
-    function joinRoom() {
-      const roomId = document.getElementById("roomId").value;
-      if (!roomId) return setStatus("Lütfen bir oda ID gir.");
-      socket.emit("join-room", roomId);
+    async function joinRoom() {
+      const roomId = document.getElementById('roomId').value;
+      if (!roomId) return setStatus('Lütfen bir oda ID gir.');
+      try {
+        await ensureMic();
+        socket.emit('join-room', roomId);
+      } catch (e) {
+        console.error(e);
+      }
     }
 
-    socket.on("roomExists", () => setStatus("❌ Bu oda zaten var!"));
-    socket.on("roomNotFound", () => setStatus("❌ Böyle bir oda yok."));
-    socket.on("roomFull", () => setStatus("❌ Oda dolu (5 kişi sınırı)."));
+    socket.on('roomExists', () => setStatus('❌ Bu oda zaten var!'));
+    socket.on('roomNotFound', () => setStatus('❌ Böyle bir oda yok.'));
+    socket.on('roomFull', () => setStatus('❌ Oda dolu (5 kişi sınırı).'));
 
-    socket.on("roomCreated", (roomId) => {
-      setStatus("✅ Oda oluşturuldu.");
+    socket.on('roomCreated', (roomId) => {
+      setStatus('✅ Oda oluşturuldu.');
       currentRoom = roomId;
-      document.getElementById("shareLink").innerText = window.location.origin + "?room=" + roomId;
+      document.getElementById('shareLink').innerText = window.location.origin + '?room=' + roomId;
+      // refresh list when a room is created
+      requestRooms();
     });
 
-    socket.on("joinedRoom", async (roomId) => {
-      setStatus("✅ Odaya katıldın.");
-      currentRoom = roomId;
-      document.getElementById("shareLink").innerText = window.location.origin + "?room=" + roomId;
-      localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    socket.on('room-list', (rooms) => {
+      const el = document.getElementById('roomsList');
+      if (!rooms || !rooms.length) {
+        el.innerText = '(hiç oda yok)';
+        return;
+      }
+      el.innerHTML = '';
+      rooms.forEach(r => {
+        const btn = document.createElement('button');
+        btn.style.width = '100%';
+        btn.style.textAlign = 'left';
+        btn.style.padding = '8px';
+        btn.style.marginBottom = '6px';
+        btn.style.border = '1px solid rgba(255,255,255,0.03)';
+        btn.style.borderRadius = '6px';
+        btn.style.background = 'transparent';
+        btn.style.color = 'var(--muted)';
+        btn.innerText = `${r.id}  —  ${r.size} kişi`;
+        btn.onclick = () => {
+          document.getElementById('roomId').value = r.id;
+          joinRoom();
+        };
+        el.appendChild(btn);
+      });
+    });
 
-      socket.on("user-joined", (id) => {
+    socket.on('joinedRoom', async (roomId) => {
+      setStatus('✅ Odaya katıldın.');
+      currentRoom = roomId;
+      document.getElementById('shareLink').innerText = window.location.origin + '?room=' + roomId;
+      if (!localStream) await ensureMic();
+
+      socket.on('user-joined', (id) => {
         const peer = createPeer(id);
         peers[id] = peer;
+        // attach tracks
         localStream.getTracks().forEach(track => peer.addTrack(track, localStream));
       });
 
-      socket.on("signal", ({ from, data }) => {
+      socket.on('signal', ({ from, data }) => {
         if (!peers[from]) {
           const peer = createPeer(from, false);
           peers[from] = peer;
@@ -97,11 +215,12 @@
         peers[from].signal(data);
       });
 
-      socket.on("user-left", (id) => {
+      socket.on('user-left', (id) => {
         if (peers[id]) {
           peers[id].destroy();
           delete peers[id];
         }
+        refreshUsersList();
       });
     });
 
@@ -110,42 +229,111 @@
         initiator,
         trickle: false,
         stream: localStream,
-        config: {
-          iceServers: [{ urls: "stun:stun.l.google.com:19302" }]
-        }
+        config: { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] }
       });
 
-      peer.on("signal", data => {
-        socket.emit("signal", { to: id, data });
-      });
+      peer.on('signal', data => socket.emit('signal', { to: id, data }));
 
-      peer.on("stream", stream => {
-        // KENDİ SESİNİ YENİDEN DUYMAMAK İÇİN GEREKLİ FİLTRE
-        if (id === socket.id) return;
-
-        const audio = document.createElement("audio");
+      peer.on('stream', stream => {
+        // append remote audio to container
+        const container = document.getElementById('remoteAudios');
+        const wrapper = document.createElement('div');
+        wrapper.className = 'card';
+        const label = document.createElement('div');
+        label.style.fontSize = '13px';
+        label.style.color = 'var(--muted)';
+        label.innerText = 'Kullanıcı: ' + id;
+        const audio = document.createElement('audio');
         audio.srcObject = stream;
         audio.autoplay = true;
-        audio.controls = false;
-        document.body.appendChild(audio);
+        audio.controls = true;
+        wrapper.appendChild(label);
+        wrapper.appendChild(audio);
+        container.appendChild(wrapper);
+        refreshUsersList();
       });
 
-      peer.on("connect", () => {
-        const list = document.getElementById("users");
-        list.innerText += `\n✅ Bağlı: ${id}`;
-      });
+      peer.on('connect', () => { refreshUsersList(); });
 
       return peer;
     }
-a
+
+    function refreshUsersList(){
+      const el = document.getElementById('users');
+      const ids = Object.keys(peers);
+      el.innerText = 'Bağlı Kullanıcılar:' + (ids.length ? '\n' + ids.map(id => '• ' + id).join('\n') : '\n(hiç kimse)');
+    }
+
+    function setupAnalyzer(stream){
+      try{
+        audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        const source = audioCtx.createMediaStreamSource(stream);
+        analyser = audioCtx.createAnalyser();
+        analyser.fftSize = 2048;
+        const bufferLength = analyser.fftSize;
+        dataArray = new Uint8Array(bufferLength);
+        source.connect(analyser);
+        isMicOn = true;
+        micState.innerText = 'Durum: Açık';
+        muteBtn.innerText = 'Mikrofonu Kapat';
+        animateMeter();
+      }catch(e){
+        console.warn('Analyzer setup failed', e);
+      }
+    }
+
+    function animateMeter(){
+      if (!analyser) return;
+      analyser.getByteTimeDomainData(dataArray);
+      // compute RMS
+      let sum = 0;
+      for(let i=0;i<dataArray.length;i++){
+        const v = (dataArray[i] - 128) / 128;
+        sum += v * v;
+      }
+      const rms = Math.sqrt(sum / dataArray.length);
+      const level = Math.min(100, Math.round(rms * 200));
+      micLevel.value = level;
+      levelBar.style.width = level + '%';
+      rafId = requestAnimationFrame(animateMeter);
+    }
+
+    async function toggleMic(){
+      if (!localStream){
+        try{ await ensureMic(); }
+        catch{return}
+      }
+      const tracks = localStream.getAudioTracks();
+      if (!tracks.length) return;
+      const enabled = tracks[0].enabled;
+      tracks.forEach(t => t.enabled = !enabled);
+      isMicOn = !enabled;
+      micState.innerText = 'Durum: ' + (isMicOn ? 'Açık' : 'Kapalı');
+      muteBtn.innerText = isMicOn ? 'Mikrofonu Kapat' : 'Mikrofonu Aç';
+      if (!isMicOn){ micLevel.value = 0; levelBar.style.width = '0%'; }
+    }
+
+    // handle ngrok help button
+    document.getElementById('ngrokHelp').onclick = () => {
+      alert('ngrok kullanımı için hesabınıza authtoken ekleyin. README dosyasına bakın.');
+    };
+
+    // parse room param on load
     window.onload = () => {
       const params = new URLSearchParams(window.location.search);
-      const room = params.get("room");
+      const room = params.get('room');
       if (room) {
-        document.getElementById("roomId").value = room;
+        document.getElementById('roomId').value = room;
         joinRoom();
       }
+      // request existing rooms on load
+      requestRooms();
     };
+
+    function requestRooms(){
+      socket.emit('get-rooms');
+    }
+
   </script>
 </body>
 </html>
