@@ -1,0 +1,132 @@
+body.light-theme button {
+  background: linear-gradient(90deg, #ffb86c 0%, #ff6e6e 100%) !important;
+  color: #232946 !important;
+  border: 1.5px solid #ffb86c;
+  box-shadow: 0 6px 18px rgba(255,184,108,0.13);
+}
+body.light-theme button.ghost {
+  background: transparent !important;
+  color: #ff6e6e !important;
+  border: 1.5px solid #ff6e6e;
+  box-shadow: none;
+}
+body.light-theme button:hover {
+  background: linear-gradient(90deg, #ffb86c 0%, #ff6e6e 100%) !important;
+  filter: brightness(1.08);
+  box-shadow: 0 10px 24px rgba(255,110,110,0.13);
+}
+:root {
+  --bg-1: #181c2b;
+  --bg-2: #232946;
+  --card: rgba(255,255,255,0.06);
+  --accent-start: #ffb86c;
+  --accent-end: #ff6e6e;
+  --muted: #b8c1ec;
+  --glass: rgba(255,255,255,0.08);
+  --text-main: #f4f4fa;
+  --text-invert: #232946;
+}
+
+body.light-theme {
+  --bg-1: #f4f4fa;
+  --bg-2: #e9e9f3;
+  --card: rgba(35,41,70,0.06);
+  --accent-start: #ffb86c;
+  --accent-end: #ff6e6e;
+  --muted: #6b7280;
+  --glass: rgba(35,41,70,0.08);
+  --text-main: #232946;
+  --text-invert: #f4f4fa;
+}
+*{box-sizing:border-box}
+html,body{height:100%}
+body{
+  margin:0;
+  font-family: Inter, system-ui, -apple-system, 'Segoe UI', Roboto, Arial;
+  background: linear-gradient(120deg,var(--bg-1) 0%, var(--bg-2) 100%);
+  color: var(--text-main);
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  padding:36px;
+  overflow-y:auto;
+  transition: background 0.4s, color 0.3s;
+}
+
+body::before, body::after{
+  content:"";
+  position:fixed;
+  width:420px;
+  height:420px;
+  filter:blur(80px);
+  opacity:0.65;
+  pointer-events:none;
+  z-index:0;
+}
+body::before{ right:-80px; top:-80px; background: radial-gradient(circle at 30% 30%, rgba(255,184,108,0.18), transparent 30%); transform: rotate(12deg); animation: float1 8s ease-in-out infinite; }
+body::after{ left:-60px; bottom:-60px; background: radial-gradient(circle at 70% 70%, rgba(255,110,110,0.12), transparent 30%); transform: rotate(-8deg); animation: float2 10s ease-in-out infinite; }
+
+.app{
+  position:relative;
+  width:100%;
+  max-width:980px;
+  background: linear-gradient(180deg, var(--card), rgba(255,255,255,0.01));
+  border-radius:18px;
+  padding:32px;
+  box-shadow: 0 12px 48px rgba(24,28,43,0.18), 0 1.5px 0 rgba(255,255,255,0.04);
+  border: 1.5px solid var(--glass);
+  backdrop-filter: blur(8px);
+  z-index:1;
+  overflow:hidden;
+  animation: appear .6s ease both;
+  transition: background 0.4s, box-shadow 0.3s;
+}
+
+header{display:flex;align-items:center;justify-content:space-between;margin-bottom:18px}
+h2{margin:0;font-weight:700;color:var(--accent-end);letter-spacing:0.2px;text-shadow:0 2px 8px rgba(255,110,110,0.08);transition:color 0.3s;}
+.subtitle{color:var(--muted);font-size:13px}
+
+.controls{display:grid;grid-template-columns:1fr 320px;gap:24px;align-items:start}
+.card{background:linear-gradient(180deg, var(--card), rgba(255,255,255,0.01));padding:22px;border-radius:16px;border:1.5px solid var(--glass);transition:background 0.4s, border 0.3s;}
+
+input[type="text"], textarea, .select{
+  width:100%;padding:13px 14px;border-radius:13px;border:1.5px solid var(--glass);background:rgba(255,255,255,0.03);color:inherit;transition:box-shadow .18s,transform .12s, background 0.3s, border 0.3s;font-size:15px;
+}
+input[type="text"]:focus{box-shadow:0 10px 30px var(--accent-end, #ff6e6e, 0.13);transform:translateY(-2px);outline:none}
+
+button{
+  padding:12px 16px;border-radius:13px;border:none;color:var(--text-invert);font-weight:700;cursor:pointer;background:linear-gradient(90deg,var(--accent-start),var(--accent-end));box-shadow:0 10px 22px rgba(255,110,110,0.09);transition:transform .12s,box-shadow .12s,opacity .12s, background 0.3s, color 0.3s;font-size:15px;letter-spacing:0.02em;
+}
+button:hover{transform:translateY(-3px);box-shadow:0 14px 30px rgba(34,193,195,0.12)}
+button.ghost{background:transparent;color:var(--accent-end);box-shadow:none;border:1.5px solid var(--accent-end)}
+
+.right{display:flex;flex-direction:column;gap:12px}
+#users{margin-top:12px;background:var(--card);padding:16px;border-radius:14px;min-height:72px;white-space:pre-line;color:var(--muted);font-size:15px;transition:background 0.4s, color 0.3s;}
+
+.mic-panel{display:flex;flex-direction:column;gap:12px}
+.meter{background:linear-gradient(90deg, var(--glass), rgba(255,255,255,0.01));border-radius:8px;height:13px;overflow:hidden;transition:background 0.4s;}
+.meter > .level{height:100%;width:0%;background:linear-gradient(90deg,var(--accent-end),var(--accent-start));transition:width .12s linear;}
+.mic-row{display:flex;gap:8px;align-items:center}
+#micLevel{appearance:none;width:100%}
+#micLevel::-webkit-slider-thumb{appearance:none;width:16px;height:16px;border-radius:50%;background:linear-gradient(90deg,var(--accent-end),var(--accent-start));box-shadow:0 0 12px rgba(255,110,110,0.18)}
+
+.remote-audios{display:flex;flex-direction:column;gap:8px;margin-top:10px}
+.remote-audios .card{display:flex;flex-direction:row;gap:16px;align-items:center;padding:16px}
+.remote-audios audio{width:100%;max-width:280px;border-radius:12px}
+
+.muted{opacity:0.7}
+footer{margin-top:6px;color:var(--muted);font-size:13px}
+
+.chat-message{padding:13px 16px;border-radius:14px;margin-bottom:12px;background:linear-gradient(180deg, rgba(255,184,108,0.04), rgba(255,110,110,0.03));border:1.5px solid var(--accent-end);box-shadow:0 6px 18px rgba(24,28,43,0.18);transition:background 0.4s, border 0.3s;}
+
+.chat-meta{font-size:12px;color:var(--muted);margin-bottom:6px}
+
+@media (max-width:880px){.controls{grid-template-columns:1fr}} 
+
+@keyframes float1{0%{transform:translateY(0) rotate(12deg)}50%{transform:translateY(18px) rotate(12deg)}100%{transform:translateY(0) rotate(12deg)}}
+@keyframes float2{0%{transform:translateY(0) rotate(-8deg)}50%{transform:translateY(-18px) rotate(-8deg)}100%{transform:translateY(0) rotate(-8deg)}}
+@keyframes appear{0%{opacity:0;transform:translateY(8px)}100%{opacity:1;transform:none}}
+
+@media (prefers-reduced-motion: reduce){
+  body::before, body::after, .app, button{animation:none!important;transition:none!important}
+}
