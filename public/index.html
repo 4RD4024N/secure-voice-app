@@ -261,7 +261,16 @@
     function refreshUsersList(){
       const el = document.getElementById('users');
       const ids = Object.keys(peers);
-      el.innerText = 'Bağlı Kullanıcılar:' + (ids.length ? '\n' + ids.map(id => '• ' + id).join('\n') : '\n(hiç kimse)');
+      const lines = [];
+      // show current user first (if available)
+      if (socket && socket.id) {
+        lines.push('• ' + socket.id + '  (you)');
+      }
+      // then show other connected peers
+      ids.forEach(id => {
+        if (id !== socket.id) lines.push('• ' + id);
+      });
+      el.innerText = 'Bağlı Kullanıcılar:' + (lines.length ? '\n' + lines.join('\n') : '\n(hiç kimse)');
     }
 
     function setupAnalyzer(stream){
