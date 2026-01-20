@@ -66,6 +66,10 @@
       <div class="card">
         <input id="roomId" type="text" placeholder="Oda ID gir (örnek: dostlar)" />
         <div style="display:flex;gap:8px;margin-top:8px">
+          <input id="displayName" type="text" maxlength="16" placeholder="İsim (en fazla 16 karakter)" style="flex:1" />
+          <button id="setNameBtn" style="width:140px">İsim Değiştir</button>
+        </div>
+        <div style="display:flex;gap:8px;margin-top:8px">
           <button id="createBtn">Oda Oluştur</button>
           <button id="joinBtn">Odaya Katıl</button>
         </div>
@@ -78,6 +82,17 @@
         <div id="roomsList" style="margin-top:8px;background:rgba(255,255,255,0.01);padding:8px;border-radius:8px;min-height:48px;color:var(--muted)">Yükleniyor...</div>
         <div id="users"><b>Bağlı Kullanıcılar:</b></div>
         <div class="remote-audios" id="remoteAudios"></div>
+        <div style="margin-top:10px">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+            <div style="font-weight:600">Oda Sohbeti</div>
+            <div style="font-size:12px;color:var(--muted)">Mesajlar herkese gönderilir</div>
+          </div>
+          <div id="chatMessages" style="max-height:200px;overflow:auto;padding:8px;background:rgba(255,255,255,0.01);border-radius:8px;color:var(--muted)"></div>
+          <div style="display:flex;gap:8px;margin-top:8px">
+            <input id="chatInput" placeholder="Mesaj yaz..." style="flex:1;padding:8px;border-radius:8px;border:1px solid rgba(255,255,255,0.03);background:transparent;color:inherit" />
+            <button id="chatSend" style="padding:8px 12px;border-radius:8px">Gönder</button>
+          </div>
+        </div>
       </div>
 
       <div class="right">
@@ -107,6 +122,8 @@
     let peers = {};
     let localStream = null;
     let currentRoom = "";
+    let socketNames = {};
+    let myName = null;
     let audioCtx = null;
     let analyser = null;
     let dataArray = null;
@@ -119,10 +136,14 @@
     const micLevel = document.getElementById('micLevel');
     const levelBar = document.getElementById('levelBar');
     const micState = document.getElementById('micState');
+    const chatInput = document.getElementById('chatInput');
+    const chatSend = document.getElementById('chatSend');
+    const chatMessages = document.getElementById('chatMessages');
 
     createBtn.onclick = createRoom;
     joinBtn.onclick = joinRoom;
     muteBtn.onclick = toggleMic;
+    document.getElementById('setNameBtn').onclick = setName;
     document.getElementById('refreshRooms').onclick = requestRooms;
 
     function setStatus(msg) { document.getElementById('status').innerText = msg; }
@@ -143,6 +164,15 @@
       const roomId = document.getElementById('roomId').value;
       if (!roomId) return setStatus('Lütfen bir oda ID gir.');
       socket.emit('create-room', roomId);
+    }
+
+    function setName(){
+      const input = document.getElementById('displayName');
+      if (!input) return;
+      const name = (input.value || '').trim();
+      if (!name) return setStatus('Lütfen geçerli bir isim girin.');
+      if (name.length > 16) return setStatus('İsim 16 karakterden uzun olamaz.');
+      socket.emit('set-name', name);
     }
 
     async function joinRoom() {
@@ -168,6 +198,47 @@
       requestRooms();
     });
 
+    socket.on('chat-message', (payload) => {
+      // payload: { fromId, fromName, text, ts }
+      appendChatMessage(payload.fromName || payload.from, payload.text, payload.ts, payload.fromId || payload.from);
+    });
+
+    socket.on('name-set', (res) => {
+      if (res && res.success) {
+        myName = res.name;
+        socketNames[socket.id] = res.name;
+        setStatus('İsim ayarlandı: ' + res.name);
+      } else {
+        setStatus('İsim değiştirilemedi: ' + (res && res.reason ? res.reason : 'hata'));
+      }
+    });
+
+    socket.on('name-changed', ({ id, name }) => {
+      if (!id) return;
+      if (name) socketNames[id] = name; else delete socketNames[id];
+      refreshUsersList();
+    });
+
+    socket.on('left-room', (roomId) => {
+      if (currentRoom === roomId) {
+        setStatus('✅ Odanan ayrıldınız.');
+        currentRoom = '';
+        document.getElementById('shareLink').innerText = '';
+        requestRooms();
+        refreshUsersList();
+      }
+    });
+
+    socket.on('room-deleted', (roomId) => {
+      if (currentRoom === roomId) {
+        setStatus('⚠️ Oda silindi: ' + roomId);
+        currentRoom = '';
+        document.getElementById('shareLink').innerText = '';
+      }
+      requestRooms();
+      refreshUsersList();
+    });
+
     socket.on('room-list', (rooms) => {
       const el = document.getElementById('roomsList');
       if (!rooms || !rooms.length) {
@@ -176,31 +247,75 @@
       }
       el.innerHTML = '';
       rooms.forEach(r => {
-        const btn = document.createElement('button');
-        btn.style.width = '100%';
-        btn.style.textAlign = 'left';
-        btn.style.padding = '8px';
-        btn.style.marginBottom = '6px';
-        btn.style.border = '1px solid rgba(255,255,255,0.03)';
-        btn.style.borderRadius = '6px';
-        btn.style.background = 'transparent';
-        btn.style.color = 'var(--muted)';
-        btn.innerText = `${r.id}  —  ${r.size} kişi`;
-        btn.onclick = () => {
-          document.getElementById('roomId').value = r.id;
-          joinRoom();
+        const row = document.createElement('div');
+        row.style.display = 'flex';
+        row.style.justifyContent = 'space-between';
+        row.style.alignItems = 'center';
+        row.style.marginBottom = '6px';
+
+        const label = document.createElement('div');
+        label.style.color = 'var(--muted)';
+        label.innerText = `${r.id}  —  ${r.size} kişi`;
+        if (r.id === currentRoom) {
+          label.innerText += '   (joined)';
+          label.style.fontWeight = '600';
+          label.style.color = 'var(--accent)';
+        }
+
+        const actions = document.createElement('div');
+        actions.style.display = 'flex';
+        actions.style.gap = '6px';
+
+        const joinBtn = document.createElement('button');
+        joinBtn.innerText = 'Katıl';
+        joinBtn.onclick = () => { document.getElementById('roomId').value = r.id; joinRoom(); };
+
+        const leaveBtn = document.createElement('button');
+        leaveBtn.innerText = 'Ayrıl';
+        leaveBtn.style.background = 'transparent';
+        leaveBtn.style.color = 'var(--muted)';
+        leaveBtn.onclick = () => { socket.emit('leave-room', r.id); };
+
+        const delBtn = document.createElement('button');
+        delBtn.innerText = 'Sil';
+        delBtn.style.background = 'transparent';
+        delBtn.style.color = '#ff7b7b';
+        delBtn.onclick = () => {
+          if (!confirm('Bu odayı silmek istediğinizden emin misiniz?')) return;
+          socket.emit('delete-room', r.id);
         };
-        el.appendChild(btn);
+
+        // show appropriate buttons
+        actions.appendChild(joinBtn);
+        actions.appendChild(leaveBtn);
+        actions.appendChild(delBtn);
+
+        row.appendChild(label);
+        row.appendChild(actions);
+        el.appendChild(row);
       });
     });
 
-    socket.on('joinedRoom', async (roomId) => {
+    socket.on('joinedRoom', async (roomId, others, history, names) => {
       setStatus('✅ Odaya katıldın.');
       currentRoom = roomId;
       document.getElementById('shareLink').innerText = window.location.origin + '?room=' + roomId;
       if (!localStream) await ensureMic();
 
-      socket.on('user-joined', (id) => {
+      // render chat history for this room (WhatsApp-like)
+      chatMessages.innerHTML = '';
+      // save known names mapping for this room
+      socketNames = names || {};
+      // update myName if server knows it
+      if (socketNames[socket.id]) myName = socketNames[socket.id];
+      if (Array.isArray(history) && history.length) {
+        history.forEach(m => appendChatMessage(m.fromName || m.from, m.text, m.ts, m.fromId || m.from));
+      }
+
+      socket.on('user-joined', (payload) => {
+        const id = payload && payload.id ? payload.id : payload;
+        const name = payload && payload.name ? payload.name : null;
+        if (name) socketNames[id] = name;
         const peer = createPeer(id);
         peers[id] = peer;
         // attach tracks
@@ -220,8 +335,11 @@
           peers[id].destroy();
           delete peers[id];
         }
+        // remove name mapping
+        if (socketNames[id]) delete socketNames[id];
         refreshUsersList();
       });
+      refreshUsersList();
     });
 
     function createPeer(id, initiator = true) {
@@ -264,11 +382,14 @@
       const lines = [];
       // show current user first (if available)
       if (socket && socket.id) {
-        lines.push('• ' + socket.id + '  (you)');
+        const display = myName || socketNames[socket.id] || socket.id;
+        lines.push('• ' + display + '  (you)');
       }
       // then show other connected peers
       ids.forEach(id => {
-        if (id !== socket.id) lines.push('• ' + id);
+        if (id === socket.id) return;
+        const display = socketNames[id] || id;
+        lines.push('• ' + display);
       });
       el.innerText = 'Bağlı Kullanıcılar:' + (lines.length ? '\n' + lines.join('\n') : '\n(hiç kimse)');
     }
@@ -342,6 +463,34 @@
     function requestRooms(){
       socket.emit('get-rooms');
     }
+
+    function appendChatMessage(fromName, text, ts, fromId){
+      const row = document.createElement('div');
+      row.style.padding = '6px';
+      row.style.borderBottom = '1px solid rgba(255,255,255,0.01)';
+      const id = fromId || fromName;
+      const display = (id === socket.id) ? ((myName || socketNames[socket.id] || socket.id) + ' (you)') : (fromName || id);
+      const time = ts ? new Date(ts).toLocaleTimeString() : '';
+      row.innerHTML = `<div style="font-size:12px;color:var(--muted)">${escapeHtml(display)} <span style='float:right;font-size:11px;color:rgba(255,255,255,0.2)'>${time}</span></div><div style="margin-top:4px">${escapeHtml(text)}</div>`;
+      chatMessages.appendChild(row);
+      chatMessages.scrollTop = chatMessages.scrollHeight;
+    }
+
+    function escapeHtml(unsafe){
+      return unsafe.replace(/[&<>"']/g, function(m){ return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[m]; });
+    }
+
+    chatSend.onclick = () => {
+      const text = chatInput.value && chatInput.value.trim();
+      if (!text) return;
+      if (!currentRoom) { setStatus('Önce bir odaya katılın.'); return; }
+      socket.emit('chat-message', { roomId: currentRoom, text });
+      chatInput.value = '';
+    };
+
+    chatInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); chatSend.click(); }
+    });
 
   </script>
 </body>
