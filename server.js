@@ -85,8 +85,13 @@ io.on('connection', (socket) => {
   });
 
   // Voice data relay - optimized for low latency
+  let voiceDataCount = 0;
   socket.on('voice-data', (audioData) => {
     if (currentRoom) {
+      voiceDataCount++;
+      if (voiceDataCount % 50 === 0) {
+        console.log('Voice data relayed:', voiceDataCount, 'packets from', username, 'in room', currentRoom);
+      }
       socket.to(currentRoom).emit('voice-data', {
         userId: socket.id,
         audio: audioData

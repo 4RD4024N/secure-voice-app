@@ -24,8 +24,8 @@ export default function App() {
   const audioContextRef = useRef();
   const analyserRef = useRef();
   const animationFrameRef = useRef();
-  const audioPlayersRef = useRef({});
-  const processorRef = useRef();
+  const peersRef = useRef({});
+  const remoteStreamsRef = useRef({});
 
   // Connect to socket on mount
   useEffect(() => {
@@ -82,9 +82,33 @@ export default function App() {
     });
 
     // Server-relayed audio
-    socket.on('voice-data', ({ userId, audio }) => {
-      if (userId !== socket.id) {
-        playAudio(userId, audio);
+    // WebRTC signaling
+    socket.on('user-joined', ({ userId }) => {
+      console.log('User joined, creating offer for:', userId);
+      createPeerConnection(userId, true);
+    });
+
+    socket.on('offer', async ({ from, offer }) => {
+      console.log('Received offer from:', from);
+      const pc = createPeerConnection(from, false);
+      await pc.setRemoteDescription(new RTCSessionDescription(offer));
+      const answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
+      socket.emit('answer', { to: from, answer });
+    });
+
+    socket.on('answer', async ({ from, answer }) => {
+      console.log('Received answer from:', from);
+      const pc = peersRef.current[from];
+      if (pc) {
+        await pc.setRemoteDescription(new RTCSessionDescription(answer));
+      }
+    });
+
+    socket.on('ice-candidate', async ({ from, candidate }) => {
+      const pc = peersRef.current[from];
+      if (pc) {
+        await pc.addIceCandidate(new RTCIceCandidate(candidate));
       }
     });
 
@@ -106,41 +130,56 @@ export default function App() {
     }
   }, [isMuted]);
 
-  function playAudio(userId, audioData) {
-    if (!audioPlayersRef.current[userId]) {
-      const audioContext = new (window.AudioContext || window.webkitAudioContext)();
-      audioPlayersRef.current[userId] = { 
-        context: audioContext, 
-        nextStartTime: audioContext.currentTime 
-      };
+  function createPeerConnection(userId, isInitiator) {
+    if (peersRef.current[userId]) {
+      return peersRef.current[userId];
     }
 
-    const player = audioPlayersRef.current[userId];
-    const context = player.context;
-    
-    // Convert received data to Float32Array
-    const float32Array = new Float32Array(audioData);
-    
-    // Create audio buffer
-    const audioBuffer = context.createBuffer(1, float32Array.length, context.sampleRate);
-    audioBuffer.getChannelData(0).set(float32Array);
-    
-    // Calculate duration
-    const duration = float32Array.length / context.sampleRate;
-    
-    // Create source
-    const source = context.createBufferSource();
-    source.buffer = audioBuffer;
-    source.connect(context.destination);
-    
-    // Reset if behind
-    if (player.nextStartTime < context.currentTime) {
-      player.nextStartTime = context.currentTime;
+    const pc = new RTCPeerConnection({
+      iceServers: [
+        { urls: 'stun:stun.l.google.com:19302' },
+        { urls: 'stun:stun1.l.google.com:19302' }
+      ]
+    });
+
+    peersRef.current[userId] = pc;
+
+    // Add local stream
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach(track => {
+        pc.addTrack(track, streamRef.current);
+      });
     }
-    
-    // Play
-    source.start(player.nextStartTime);
-    player.nextStartTime += duration;
+
+    // Handle incoming audio
+    pc.ontrack = (event) => {
+      console.log('Received remote stream from:', userId);
+      const [remoteStream] = event.streams;
+      remoteStreamsRef.current[userId] = remoteStream;
+      
+      // Create audio element to play remote stream
+      const audio = new Audio();
+      audio.srcObject = remoteStream;
+      audio.autoplay = true;
+      audio.play().catch(e => console.log('Audio play error:', e));
+    };
+
+    // Handle ICE candidates
+    pc.onicecandidate = (event) => {
+      if (event.candidate) {
+        socketRef.current.emit('ice-candidate', { to: userId, candidate: event.candidate });
+      }
+    };
+
+    // Create offer if initiator
+    if (isInitiator) {
+      pc.createOffer().then(offer => {
+        pc.setLocalDescription(offer);
+        socketRef.current.emit('offer', { to: userId, offer });
+      });
+    }
+
+    return pc;
   }
 
   const handleSetUsername = (e) => {
@@ -178,6 +217,14 @@ export default function App() {
         
         // Setup audio analysis for volume meter
         const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+        
+        // Resume AudioContext (required by browsers for user-initiated audio)
+        if (audioContext.state === 'suspended') {
+          audioContext.resume().then(() => {
+            console.log('AudioContext resumed, state:', audioContext.state);
+          });
+        }
+        
         const analyser = audioContext.createAnalyser();
         const source = audioContext.createMediaStreamSource(stream);
         source.connect(analyser);
@@ -197,22 +244,7 @@ export default function App() {
         };
         updateLevel();
 
-        // Capture and send audio - smaller buffer for lower latency
-        const processor = audioContext.createScriptProcessor(1024, 1, 1);
-        source.connect(processor);
-        processor.connect(audioContext.destination);
-        
-        processor.onaudioprocess = (e) => {
-          if (!isMuted && socketRef.current) {
-            const inputData = e.inputBuffer.getChannelData(0);
-            // Send as array for faster transmission
-            socketRef.current.emit('voice-data', Array.from(inputData));
-          }
-        };
-        
-        processorRef.current = processor;
-
-        // Join the room via socket
+        // Join the room via socket - WebRTC connections will be created automatically
         socketRef.current.emit('join', { room: roomName, user: username });
         setView('room');
       })
@@ -223,16 +255,12 @@ export default function App() {
   };
 
   const leaveRoom = () => {
-    // Cleanup audio players
-    Object.values(audioPlayersRef.current).forEach(player => {
-      player.context.close();
+    // Cleanup peer connections
+    Object.values(peersRef.current).forEach(pc => {
+      pc.close();
     });
-    audioPlayersRef.current = {};
-    
-    if (processorRef.current) {
-      processorRef.current.disconnect();
-      processorRef.current = null;
-    }
+    peersRef.current = {};
+    remoteStreamsRef.current = {};
     
     if (streamRef.current) {
       streamRef.current.getTracks().forEach(track => track.stop());
