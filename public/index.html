@@ -8,70 +8,62 @@
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
-  <div class="app">
-    <header>
-      <h2>Güvenli Sesli Sohbet</h2>
-      <div style="display:flex;align-items:center;gap:12px">
-        <div style="color:var(--muted);font-size:13px">Simple WebRTC + Signaling</div>
-        <button id="themeToggle" class="ghost" style="padding:7px 16px;font-size:14px;min-width:90px" title="Tema Değiştir">🌙/☀️</button>
-      </div>
+
+  <div class="glass-app">
+    <header class="glass-header">
+      <h1>Sesli Sohbet</h1>
+      <button id="themeToggle" class="ghost glass-btn" title="Tema Değiştir">Tema</button>
     </header>
-
-    <div class="controls">
-      <div class="card">
-        <input id="roomId" type="text" placeholder="Oda ID gir (örnek: dostlar)" />
-        <div style="display:flex;gap:8px;margin-top:8px">
-          <input id="displayName" type="text" maxlength="16" placeholder="İsim (en fazla 16 karakter)" style="flex:1" />
-          <button id="setNameBtn" style="width:140px">İsim Değiştir</button>
+    <main class="glass-main">
+      <section class="glass-card glass-controls">
+        <input id="roomId" type="text" placeholder="Oda ID" class="glass-input" />
+        <input id="displayName" type="text" maxlength="16" placeholder="İsim" class="glass-input" />
+        <div class="glass-btn-row">
+          <button id="setNameBtn" class="glass-btn">İsim Değiştir</button>
+          <button id="createBtn" class="glass-btn">Oda Oluştur</button>
+          <button id="joinBtn" class="glass-btn">Katıl</button>
         </div>
-        <div style="display:flex;gap:8px;margin-top:8px">
-          <button id="createBtn">Oda Oluştur</button>
-          <button id="joinBtn">Odaya Katıl</button>
+        <div class="glass-status-row">
+          <span id="status" class="glass-status"></span>
+          <span id="shareLink" class="glass-share"></span>
         </div>
-        <p id="status" style="margin-top:10px;color:var(--muted)"></p>
-        <p style="margin:6px 0"><b>Paylaş:</b> <span id="shareLink" class="muted"></span></p>
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-top:8px">
-          <div style="font-weight:600">Oluşturulan Odalar</div>
-          <button id="refreshRooms" style="background:transparent;color:var(--accent);border:1px solid rgba(110,231,183,0.08);padding:6px 8px;font-size:13px">Yenile</button>
+        <div class="glass-row">
+          <button id="refreshRooms" class="glass-btn small">Odaları Yenile</button>
+          <span id="roomsList" class="glass-list">Yükleniyor...</span>
         </div>
-        <div id="roomsList" style="margin-top:8px;background:rgba(255,255,255,0.01);padding:8px;border-radius:8px;min-height:48px;color:var(--muted)">Yükleniyor...</div>
-        <div id="users"><b>Bağlı Kullanıcılar:</b></div>
-        <div class="remote-audios" id="remoteAudios"></div>
-        <div style="margin-top:10px">
-          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
-            <div style="font-weight:600">Oda Sohbeti</div>
-            <div style="font-size:12px;color:var(--muted)">Mesajlar herkese gönderilir</div>
-          </div>
-          <div id="chatMessages" style="max-height:200px;overflow:auto;padding:8px;background:rgba(255,255,255,0.01);border-radius:8px;color:var(--muted)"></div>
-          <div style="display:flex;gap:8px;margin-top:8px">
-            <input id="chatInput" placeholder="Mesaj yaz..." style="flex:1;padding:8px;border-radius:8px;border:1px solid rgba(255,255,255,0.03);background:transparent;color:inherit" />
-            <button id="chatSend" style="padding:8px 12px;border-radius:8px">Gönder</button>
-          </div>
+      </section>
+      <section class="glass-card glass-users">
+        <h2>Kullanıcılar</h2>
+        <div id="users" class="glass-user-list"></div>
+      </section>
+      <section class="glass-card glass-audio">
+        <h2>Ses</h2>
+        <div class="glass-audio-controls">
+          <button id="muteBtn" class="glass-btn">Mikrofon</button>
+          <button id="noiseToggle" class="ghost glass-btn">Gürültü Engelle</button>
         </div>
-      </div>
-
-      <div class="right">
-        <div class="card mic-panel">
-          <div style="display:flex;justify-content:space-between;align-items:center">
-            <div style="font-weight:600">Mikrofon</div>
-            <div id="micState" style="font-size:13px;color:var(--muted)">Durum: Kapalı</div>
-          </div>
-          <div class="mic-row">
-            <input id="micLevel" type="range" min="0" max="100" value="0" disabled />
-          </div>
-          <div class="meter" aria-hidden="true"><div class="level" id="levelBar"></div></div>
-          <div style="display:flex;gap:8px;margin-top:6px">
-            <button id="muteBtn">Mikrofonu Aç</button>
-            <button id="ngrokHelp" style="background:transparent;color:var(--accent);border:1px solid rgba(110,231,183,0.12)">Bağlantı Yardım</button>
-          </div>
+        <div class="glass-meter">
+          <input id="micLevel" type="range" min="0" max="100" value="0" disabled />
+          <div class="meter"><div class="level" id="levelBar"></div></div>
+          <span id="micState" class="glass-mic-state"></span>
         </div>
-        <footer>Not: Tarayıcı mikrofon izinleri gereklidir.</footer>
-      </div>
-    </div>
+        <div id="remoteAudios" class="glass-remote-audios"></div>
+      </section>
+      <section class="glass-card glass-chat">
+        <h2>Sohbet</h2>
+        <div id="chatMessages" class="glass-chat-messages"></div>
+        <div class="glass-chat-row">
+          <input id="chatInput" placeholder="Mesaj yaz..." class="glass-input" />
+          <button id="chatSend" class="glass-btn">Gönder</button>
+        </div>
+      </section>
+    </main>
+    <footer class="glass-footer">Tarayıcı mikrofon izinleri gereklidir.</footer>
   </div>
 
   <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
   <script src="https://unpkg.com/simple-peer@9.11.1/simplepeer.min.js"></script>
+  <script src="rnnoise-wasm.min.js"></script>
   <script>
     // Theme toggle logic
     const themeToggle = document.getElementById('themeToggle');
@@ -128,23 +120,74 @@
 
     function setStatus(msg) { document.getElementById('status').innerText = msg; }
 
+    let noiseSuppressionOn = true;
+    let rnnoiseModule = null;
+    let rnnoiseProcessor = null;
     async function ensureMic() {
       if (localStream) return localStream;
       try {
-        localStream = await navigator.mediaDevices.getUserMedia({
+        const stream = await navigator.mediaDevices.getUserMedia({
           audio: {
-            noiseSuppression: true,
+            noiseSuppression: false, // We'll use RNNoise instead
             echoCancellation: true,
             autoGainControl: true,
             sampleRate: 48000
           }
         });
+        if (noiseSuppressionOn && window.RNNoise) {
+          if (!rnnoiseModule) {
+            rnnoiseModule = await window.RNNoise();
+          }
+          const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+          const source = audioCtx.createMediaStreamSource(stream);
+          const dest = audioCtx.createMediaStreamDestination();
+          // RNNoise processor node
+          if (!rnnoiseProcessor) {
+            rnnoiseProcessor = audioCtx.createScriptProcessor(512, 1, 1);
+            const frameSize = 480;
+            const rnnoise = new rnnoiseModule.RNNoise();
+            rnnoiseProcessor.onaudioprocess = function(e) {
+              const input = e.inputBuffer.getChannelData(0);
+              const output = e.outputBuffer.getChannelData(0);
+              for (let i = 0; i < input.length; i += frameSize) {
+                const frame = input.slice(i, i + frameSize);
+                const denoised = rnnoise.process(frame);
+                output.set(denoised, i);
+              }
+            };
+          }
+          source.connect(rnnoiseProcessor);
+          rnnoiseProcessor.connect(dest);
+          localStream = dest.stream;
+        } else {
+          localStream = stream;
+        }
         setupAnalyzer(localStream);
         return localStream;
       } catch (e) {
         setStatus('Mikrofon erişimi reddedildi veya bulunamadı.');
         throw e;
       }
+    }
+
+    // Noise suppression toggle logic
+    const noiseToggle = document.getElementById('noiseToggle');
+    if (noiseToggle) {
+      noiseToggle.onclick = async function() {
+        noiseSuppressionOn = !noiseSuppressionOn;
+        noiseToggle.textContent = 'Gürültü Engelle: ' + (noiseSuppressionOn ? 'Açık' : 'Kapalı');
+        // Stop and re-acquire mic with new setting
+        if (localStream) {
+          localStream.getTracks().forEach(track => track.stop());
+          localStream = null;
+        }
+        try {
+          await ensureMic();
+          setStatus('Gürültü engelleme ' + (noiseSuppressionOn ? 'açıldı.' : 'kapalı.'));
+        } catch (e) {
+          setStatus('Mikrofon yeniden başlatılamadı.');
+        }
+      };
     }
 
     function createRoom() {
