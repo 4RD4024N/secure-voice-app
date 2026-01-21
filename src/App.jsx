@@ -151,6 +151,8 @@ export default function App() {
     setMessages([]);
     setUsers([]);
     
+    console.log('Joining room:', roomName, 'as user:', username);
+    
     navigator.mediaDevices.getUserMedia({ audio: true, video: false })
       .then(stream => {
         console.log('Got user media');
@@ -237,6 +239,7 @@ export default function App() {
 
   const handleSend = (e) => {
     e.preventDefault();
+    console.log('Sending message:', message, 'username:', username, 'currentRoom:', currentRoom);
     if (message && socketRef.current) {
       socketRef.current.emit('message', message);
       setMessage('');
