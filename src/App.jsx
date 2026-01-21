@@ -18,14 +18,18 @@ export default function App() {
   const [showCreateRoom, setShowCreateRoom] = useState(false);
   const [newRoomName, setNewRoomName] = useState('');
   const [micLevel, setMicLevel] = useState(0);
+  const [isScreenSharing, setIsScreenSharing] = useState(false);
+  const [screenSharer, setScreenSharer] = useState(null);
   
   const socketRef = useRef();
   const streamRef = useRef();
+  const screenStreamRef = useRef();
   const audioContextRef = useRef();
   const analyserRef = useRef();
   const animationFrameRef = useRef();
   const peersRef = useRef({});
   const remoteStreamsRef = useRef({});
+  const remoteVideoRef = useRef();
 
   // Connect to socket on mount
   useEffect(() => {
@@ -112,6 +116,19 @@ export default function App() {
       }
     });
 
+    socket.on('screen-share-started', ({ userId, username: sharerName }) => {
+      console.log('Screen sharing started by:', sharerName);
+      setScreenSharer(sharerName);
+    });
+
+    socket.on('screen-share-stopped', () => {
+      console.log('Screen sharing stopped');
+      setScreenSharer(null);
+      if (remoteVideoRef.current) {
+        remoteVideoRef.current.srcObject = null;
+      }
+    });
+
     socket.on('error', ({ message }) => {
       alert(message);
     });
@@ -151,17 +168,25 @@ export default function App() {
       });
     }
 
-    // Handle incoming audio
+    // Handle incoming audio/video
     pc.ontrack = (event) => {
-      console.log('Received remote stream from:', userId);
+      console.log('Received remote track from:', userId, 'kind:', event.track.kind);
       const [remoteStream] = event.streams;
       remoteStreamsRef.current[userId] = remoteStream;
       
-      // Create audio element to play remote stream
-      const audio = new Audio();
-      audio.srcObject = remoteStream;
-      audio.autoplay = true;
-      audio.play().catch(e => console.log('Audio play error:', e));
+      if (event.track.kind === 'audio') {
+        // Create audio element to play remote stream
+        const audio = new Audio();
+        audio.srcObject = remoteStream;
+        audio.autoplay = true;
+        audio.play().catch(e => console.log('Audio play error:', e));
+      } else if (event.track.kind === 'video') {
+        // Display screen share
+        console.log('Received video track (screen share)');
+        if (remoteVideoRef.current) {
+          remoteVideoRef.current.srcObject = remoteStream;
+        }
+      }
     };
 
     // Handle ICE candidates
@@ -255,6 +280,11 @@ export default function App() {
   };
 
   const leaveRoom = () => {
+    // Stop screen sharing if active
+    if (isScreenSharing) {
+      stopScreenShare();
+    }
+    
     // Cleanup peer connections
     Object.values(peersRef.current).forEach(pc => {
       pc.close();
@@ -276,6 +306,7 @@ export default function App() {
     }
     
     setMicLevel(0);
+    setScreenSharer(null);
     setView('lobby');
     setCurrentRoom(null);
     setUsers([]);
@@ -290,6 +321,60 @@ export default function App() {
       socketRef.current.emit('message', message);
       setMessage('');
     }
+  };
+
+  const startScreenShare = async () => {
+    try {
+      const screenStream = await navigator.mediaDevices.getDisplayMedia({ 
+        video: { cursor: 'always' }, 
+        audio: false 
+      });
+      
+      screenStreamRef.current = screenStream;
+      setIsScreenSharing(true);
+      
+      // Notify others that screen sharing started
+      socketRef.current.emit('screen-share-started', { username });
+      
+      // Add screen track to all existing peer connections
+      Object.values(peersRef.current).forEach(pc => {
+        const videoTrack = screenStream.getVideoTracks()[0];
+        const sender = pc.getSenders().find(s => s.track?.kind === 'video');
+        
+        if (sender) {
+          sender.replaceTrack(videoTrack);
+        } else {
+          pc.addTrack(videoTrack, screenStream);
+        }
+      });
+      
+      // Handle when user stops sharing via browser UI
+      screenStream.getVideoTracks()[0].onended = () => {
+        stopScreenShare();
+      };
+      
+    } catch (err) {
+      console.error('Error starting screen share:', err);
+      alert('Could not start screen sharing. Please allow screen access.');
+    }
+  };
+
+  const stopScreenShare = () => {
+    if (screenStreamRef.current) {
+      screenStreamRef.current.getTracks().forEach(track => track.stop());
+      screenStreamRef.current = null;
+    }
+    
+    setIsScreenSharing(false);
+    socketRef.current.emit('screen-share-stopped');
+    
+    // Remove video tracks from all peer connections
+    Object.values(peersRef.current).forEach(pc => {
+      const sender = pc.getSenders().find(s => s.track?.kind === 'video');
+      if (sender) {
+        pc.removeTrack(sender);
+      }
+    });
   };
 
   const handleLogout = () => {
@@ -663,16 +748,28 @@ export default function App() {
               <div>
                 <h3 className="text-2xl font-bold text-white mb-1">Your Microphone</h3>
                 <p className="text-gray-400">
-                  {isMuted ? 'Currently muted' : 'Broadcasting to server'}
+                  {isMuted ? 'Currently muted' : 'Broadcasting live'}
                 </p>
               </div>
             </div>
-            <button
-              className={`rounded-xl px-10 py-5 font-bold text-lg transition-all duration-300 shadow-xl flex items-center gap-3 ${
-                isMuted 
-                  ? 'bg-gradient-to-r from-red-600 to-rose-600 hover:from-red-700 hover:to-rose-700 hover:shadow-red-500/50' 
-                  : 'bg-gradient-to-r from-green-600 to-emerald-600 hover:from-green-700 hover:to-emerald-700 hover:shadow-green-500/50'
-              } hover:scale-105 transform`}
+            <div className="flex items-center gap-4">
+              <button
+                onClick={isScreenSharing ? stopScreenShare : startScreenShare}
+                className={`rounded-xl px-8 py-5 font-bold text-lg transition-all duration-300 shadow-xl flex items-center gap-3 ${
+                  isScreenSharing 
+                    ? 'bg-gradient-to-r from-orange-600 to-red-600 hover:from-orange-700 hover:to-red-700 hover:shadow-orange-500/50' 
+                    : 'bg-gradient-to-r from-indigo-600 to-blue-600 hover:from-indigo-700 hover:to-blue-700 hover:shadow-indigo-500/50'
+                } hover:scale-105 transform`}
+              >
+                <span className="text-3xl">{isScreenSharing ? '🛑' : '🖥️'}</span>
+                <span>{isScreenSharing ? 'Stop Sharing' : 'Share Screen'}</span>
+              </button>
+              <button
+                className={`rounded-xl px-10 py-5 font-bold text-lg transition-all duration-300 shadow-xl flex items-center gap-3 ${
+                  isMuted 
+                    ? 'bg-gradient-to-r from-red-600 to-rose-600 hover:from-red-700 hover:to-rose-700 hover:shadow-red-500/50' 
+                    : 'bg-gradient-to-r from-green-600 to-emerald-600 hover:from-green-700 hover:to-emerald-700 hover:shadow-green-500/50'
+                } hover:scale-105 transform`}
               onClick={() => setIsMuted(m => !m)}
             >
               <span className="text-2xl">{isMuted ? '🔇' : '🎤'}</span>
@@ -708,6 +805,27 @@ export default function App() {
             </div>
           </div>
         </div>
+        
+        {/* Screen Share Display */}
+        {screenSharer && (
+          <div className="mt-6 bg-gradient-to-br from-slate-800/80 to-slate-900/80 backdrop-blur-xl rounded-2xl p-6 border-2 border-blue-500/50 shadow-xl animate-scaleIn">
+            <div className="flex items-center gap-3 mb-4">
+              <div className="text-3xl">🖥️</div>
+              <div>
+                <h3 className="text-xl font-bold text-white">Screen Share</h3>
+                <p className="text-sm text-blue-400">{screenSharer} is sharing their screen</p>
+              </div>
+            </div>
+            <div className="bg-black rounded-xl overflow-hidden border-2 border-slate-700/50 shadow-2xl">
+              <video 
+                ref={remoteVideoRef}
+                autoPlay
+                playsInline
+                className="w-full h-auto max-h-[600px] object-contain"
+              />
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

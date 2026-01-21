@@ -103,6 +103,21 @@ io.on('connection', (socket) => {
     io.to(to).emit('ice-candidate', { from: socket.id, candidate });
   });
 
+  // Screen sharing events
+  socket.on('screen-share-started', ({ username: sharerName }) => {
+    console.log('Screen share started by:', sharerName, 'in room:', currentRoom);
+    if (currentRoom) {
+      socket.to(currentRoom).emit('screen-share-started', { userId: socket.id, username: sharerName });
+    }
+  });
+
+  socket.on('screen-share-stopped', () => {
+    console.log('Screen share stopped by:', username, 'in room:', currentRoom);
+    if (currentRoom) {
+      io.to(currentRoom).emit('screen-share-stopped', { userId: socket.id });
+    }
+  });
+
   socket.on('disconnect', () => {
     if (currentRoom && rooms[currentRoom]) {
       rooms[currentRoom].users = rooms[currentRoom].users.filter(u => u.id !== socket.id);
