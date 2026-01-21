@@ -1,11 +1,14 @@
 import { useState, useRef, useEffect } from 'react';
 import { io } from 'socket.io-client';
+import SimplePeer from 'simple-peer';
 
 const SOCKET_URL = window.location.origin;
 
 export default function App() {
-  const [view, setView] = useState('username');
-  const [username, setUsername] = useState('');
+  // Check localStorage for saved username
+  const savedUsername = localStorage.getItem('voiceapp_username');
+  const [view, setView] = useState(savedUsername ? 'lobby' : 'username');
+  const [username, setUsername] = useState(savedUsername || '');
   const [currentRoom, setCurrentRoom] = useState(null);
   const [rooms, setRooms] = useState([]);
   const [users, setUsers] = useState([]);
@@ -22,8 +25,8 @@ export default function App() {
   const audioContextRef = useRef();
   const analyserRef = useRef();
   const animationFrameRef = useRef();
-  const mediaRecorderRef = useRef();
-  const audioPlayersRef = useRef({});
+  const peersRef = useRef({});
+  const audioElementsRef = useRef({});
 
   // Connect to socket on mount
   useEffect(() => {
@@ -71,7 +74,34 @@ export default function App() {
 
     socket.on('users', (userList) => {
       console.log('Users updated:', userList);
-      setUsers(userList);
+      setUsers((prevUsers) => {
+        const oldUserIds = prevUsers.map(u => u.id);
+        const newUserIds = userList.map(u => u.id);
+        
+        // Create peer connections for new users (only if we have a stream)
+        if (streamRef.current && socketRef.current) {
+          newUserIds.forEach(userId => {
+            if (!oldUserIds.includes(userId) && userId !== socketRef.current.id && !peersRef.current[userId]) {
+              console.log('Creating peer for new user:', userId);
+              createPeer(userId, true);
+            }
+          });
+          
+          // Remove peers for users who left
+          oldUserIds.forEach(userId => {
+            if (!newUserIds.includes(userId) && peersRef.current[userId]) {
+              console.log('Destroying peer for user who left:', userId);
+              peersRef.current[userId].destroy();
+              delete peersRef.current[userId];
+              if (audioElementsRef.current[userId]) {
+                delete audioElementsRef.current[userId];
+              }
+            }
+          });
+        }
+        
+        return userList;
+      });
     });
 
     socket.on('message', (msg) => {
@@ -79,9 +109,26 @@ export default function App() {
       setMessages((msgs) => [...msgs, msg]);
     });
 
-    // Receive audio from server
-    socket.on('voice-data', ({ userId, audio }) => {
-      playAudio(userId, audio);
+    // WebRTC signaling
+    socket.on('offer', ({ from, offer, username: peerUsername }) => {
+      console.log('Received offer from:', from);
+      if (streamRef.current && !peersRef.current[from]) {
+        createPeer(from, false, offer);
+      }
+    });
+
+    socket.on('answer', ({ from, answer }) => {
+      console.log('Received answer from:', from);
+      if (peersRef.current[from]) {
+        peersRef.current[from].signal(answer);
+      }
+    });
+
+    socket.on('ice-candidate', ({ from, candidate }) => {
+      console.log('Received ICE candidate from:', from);
+      if (peersRef.current[from]) {
+        peersRef.current[from].signal(candidate);
+      }
     });
 
     socket.on('error', ({ message }) => {
@@ -95,40 +142,112 @@ export default function App() {
 
   // Handle muting
   useEffect(() => {
-    if (mediaRecorderRef.current && streamRef.current) {
-      if (isMuted) {
-        streamRef.current.getAudioTracks().forEach(track => track.enabled = false);
-      } else {
-        streamRef.current.getAudioTracks().forEach(track => track.enabled = true);
-      }
+    if (streamRef.current) {
+      streamRef.current.getAudioTracks().forEach(track => {
+        track.enabled = !isMuted;
+      });
     }
   }, [isMuted]);
 
-  function playAudio(userId, audioData) {
-    if (!audioPlayersRef.current[userId]) {
-      const audioContext = new (window.AudioContext || window.webkitAudioContext)();
-      audioPlayersRef.current[userId] = { context: audioContext, queue: [], isPlaying: false };
+  function createPeer(userId, initiator, incomingOffer = null) {
+    console.log(`Creating peer connection with ${userId}, initiator: ${initiator}`);
+    
+    if (!streamRef.current) {
+      console.error('No stream available for peer connection');
+      return;
     }
+    
+    // Check if peer already exists to prevent duplicates
+    if (peersRef.current[userId]) {
+      console.log('Peer already exists for:', userId);
+      return;
+    }
+    
+    const peer = new SimplePeer({
+      initiator,
+      stream: streamRef.current,
+      trickle: true,
+      config: {
+        iceServers: [
+          { urls: 'stun:stun.l.google.com:19302' },
+          { urls: 'stun:stun1.l.google.com:19302' },
+        ]
+      }
+    });
 
-    const player = audioPlayersRef.current[userId];
-    
-    // Convert received data to Float32Array
-    const float32Array = new Float32Array(audioData);
-    
-    // Create audio buffer from raw PCM data
-    const audioBuffer = player.context.createBuffer(1, float32Array.length, player.context.sampleRate);
-    audioBuffer.getChannelData(0).set(float32Array);
-    
-    // Play immediately
-    const source = player.context.createBufferSource();
-    source.buffer = audioBuffer;
-    source.connect(player.context.destination);
-    source.start(0);
+    peer.on('signal', (signal) => {
+      console.log(`Sending ${initiator ? 'offer' : 'answer'} to:`, userId);
+      if (initiator) {
+        socketRef.current.emit('offer', { to: userId, offer: signal });
+      } else {
+        socketRef.current.emit('answer', { to: userId, answer: signal });
+      }
+    });
+
+    peer.on('stream', (remoteStream) => {
+      console.log('Received remote stream from:', userId, remoteStream);
+      
+      // Create or update audio element for this peer
+      if (!audioElementsRef.current[userId]) {
+        const audio = new Audio();
+        audio.srcObject = remoteStream;
+        audio.volume = 1.0;
+        audio.autoplay = true;
+        audioElementsRef.current[userId] = audio;
+        
+        // Play the audio
+        const playPromise = audio.play();
+        if (playPromise !== undefined) {
+          playPromise
+            .then(() => {
+              console.log('Audio playing for user:', userId);
+            })
+            .catch(err => {
+              console.error('Error playing audio for user:', userId, err);
+              // Try again after a short delay
+              setTimeout(() => {
+                audio.play().catch(e => console.error('Retry failed:', e));
+              }, 100);
+            });
+        }
+      }
+    });
+
+    peer.on('connect', () => {
+      console.log('Peer connected:', userId);
+    });
+
+    peer.on('error', (err) => {
+      console.error('Peer error with', userId, ':', err);
+    });
+
+    peer.on('close', () => {
+      console.log('Peer connection closed:', userId);
+      delete peersRef.current[userId];
+      if (audioElementsRef.current[userId]) {
+        audioElementsRef.current[userId].pause();
+        audioElementsRef.current[userId].srcObject = null;
+        delete audioElementsRef.current[userId];
+      }
+    });
+
+    peersRef.current[userId] = peer;
+
+    // If receiving an offer, signal it to the peer
+    if (incomingOffer) {
+      console.log('Signaling incoming offer to peer:', userId);
+      peer.signal(incomingOffer);
+    }
+  }
+
+  function playAudio(userId, audioData) {
+    // No longer needed - audio comes through WebRTC streams
   }
 
   const handleSetUsername = (e) => {
     e.preventDefault();
     if (username.trim()) {
+      localStorage.setItem('voiceapp_username', username.trim());
       setView('lobby');
       socketRef.current.emit('get-rooms');
     }
@@ -179,22 +298,7 @@ export default function App() {
         };
         updateLevel();
 
-        // Use ScriptProcessor to capture raw PCM audio data
-        const scriptProcessor = audioContext.createScriptProcessor(4096, 1, 1);
-        source.connect(scriptProcessor);
-        scriptProcessor.connect(audioContext.destination);
-        
-        scriptProcessor.onaudioprocess = (audioProcessingEvent) => {
-          if (!isMuted && socketRef.current) {
-            const inputBuffer = audioProcessingEvent.inputBuffer;
-            const inputData = inputBuffer.getChannelData(0);
-            // Send raw PCM data as Float32Array
-            socketRef.current.emit('voice-data', Array.from(inputData));
-          }
-        };
-        
-        mediaRecorderRef.current = scriptProcessor;
-        
+        // Join the room via socket
         socketRef.current.emit('join', { room: roomName, user: username });
         setView('room');
       })
@@ -205,14 +309,16 @@ export default function App() {
   };
 
   const leaveRoom = () => {
+    // Close all peer connections
+    Object.values(peersRef.current).forEach(peer => {
+      peer.destroy();
+    });
+    peersRef.current = {};
+    audioElementsRef.current = {};
+    
     if (streamRef.current) {
       streamRef.current.getTracks().forEach(track => track.stop());
       streamRef.current = null;
-    }
-    
-    if (mediaRecorderRef.current) {
-      mediaRecorderRef.current.disconnect();
-      mediaRecorderRef.current = null;
     }
     
     // Cleanup audio analysis
@@ -222,12 +328,6 @@ export default function App() {
     if (audioContextRef.current) {
       audioContextRef.current.close();
     }
-    
-    // Cleanup audio players
-    Object.values(audioPlayersRef.current).forEach(player => {
-      player.context.close();
-    });
-    audioPlayersRef.current = {};
     
     setMicLevel(0);
     setView('lobby');
@@ -244,6 +344,15 @@ export default function App() {
       socketRef.current.emit('message', message);
       setMessage('');
     }
+  };
+
+  const handleLogout = () => {
+    if (currentRoom) {
+      leaveRoom();
+    }
+    localStorage.removeItem('voiceapp_username');
+    setUsername('');
+    setView('username');
   };
 
   // Username entry view

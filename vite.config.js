@@ -61,10 +61,20 @@ export default defineConfig({
       process: "process/browser",
       buffer: "buffer",
       stream: "stream-browserify",
+      util: "util",
+      events: "events",
     },
   },
   define: {
     'process.env': {},
     global: 'globalThis',
+    'process.version': JSON.stringify('v16.0.0'),
+  },
+  optimizeDeps: {
+    esbuildOptions: {
+      define: {
+        global: 'globalThis'
+      }
+    }
   },
 })

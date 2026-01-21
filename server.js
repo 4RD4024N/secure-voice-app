@@ -79,21 +79,17 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on('signal', (data) => {
-    if (data.to) {
-      io.to(data.to).emit('signal', { from: socket.id, signal: data.signal, user: username });
-    }
+  // WebRTC signaling for P2P connections
+  socket.on('offer', ({ to, offer }) => {
+    io.to(to).emit('offer', { from: socket.id, offer, username });
   });
 
-  // Relay voice data to other users in the room
-  socket.on('voice-data', (audioBuffer) => {
-    if (currentRoom) {
-      socket.to(currentRoom).emit('voice-data', {
-        userId: socket.id,
-        username: username,
-        audio: audioBuffer
-      });
-    }
+  socket.on('answer', ({ to, answer }) => {
+    io.to(to).emit('answer', { from: socket.id, answer });
+  });
+
+  socket.on('ice-candidate', ({ to, candidate }) => {
+    io.to(to).emit('ice-candidate', { from: socket.id, candidate });
   });
 
   socket.on('disconnect', () => {
