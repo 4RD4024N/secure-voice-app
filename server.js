@@ -85,6 +85,17 @@ io.on('connection', (socket) => {
     }
   });
 
+  // Relay voice data to other users in the room
+  socket.on('voice-data', (audioBuffer) => {
+    if (currentRoom) {
+      socket.to(currentRoom).emit('voice-data', {
+        userId: socket.id,
+        username: username,
+        audio: audioBuffer
+      });
+    }
+  });
+
   socket.on('disconnect', () => {
     if (currentRoom && rooms[currentRoom]) {
       rooms[currentRoom].users = rooms[currentRoom].users.filter(u => u.id !== socket.id);

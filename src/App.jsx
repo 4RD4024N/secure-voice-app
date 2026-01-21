@@ -1,11 +1,10 @@
 import { useState, useRef, useEffect } from 'react';
 import { io } from 'socket.io-client';
-import Peer from 'simple-peer';
 
-const SOCKET_URL = 'http://localhost:3001';
+const SOCKET_URL = window.location.origin;
 
 export default function App() {
-  const [view, setView] = useState('username'); // 'username', 'lobby', 'room'
+  const [view, setView] = useState('username');
   const [username, setUsername] = useState('');
   const [currentRoom, setCurrentRoom] = useState(null);
   const [rooms, setRooms] = useState([]);
@@ -16,11 +15,15 @@ export default function App() {
   const [connected, setConnected] = useState(false);
   const [showCreateRoom, setShowCreateRoom] = useState(false);
   const [newRoomName, setNewRoomName] = useState('');
+  const [micLevel, setMicLevel] = useState(0);
   
-  const peersRef = useRef({});
   const socketRef = useRef();
   const streamRef = useRef();
-  const audioContainerRef = useRef();
+  const audioContextRef = useRef();
+  const analyserRef = useRef();
+  const animationFrameRef = useRef();
+  const mediaRecorderRef = useRef();
+  const audioPlayersRef = useRef({});
 
   // Connect to socket on mount
   useEffect(() => {
@@ -76,15 +79,9 @@ export default function App() {
       setMessages((msgs) => [...msgs, msg]);
     });
 
-    socket.on('signal', ({ from, signal }) => {
-      console.log('Signal received from:', from);
-      
-      if (!peersRef.current[from]) {
-        const peer = createPeer(false, from, socket);
-        peersRef.current[from] = peer;
-      }
-      
-      peersRef.current[from].signal(signal);
+    // Receive audio from server
+    socket.on('voice-data', ({ userId, audio }) => {
+      playAudio(userId, audio);
     });
 
     socket.on('error', ({ message }) => {
@@ -98,73 +95,35 @@ export default function App() {
 
   // Handle muting
   useEffect(() => {
-    if (streamRef.current) {
-      streamRef.current.getAudioTracks().forEach(track => {
-        track.enabled = !isMuted;
-      });
+    if (mediaRecorderRef.current && streamRef.current) {
+      if (isMuted) {
+        streamRef.current.getAudioTracks().forEach(track => track.enabled = false);
+      } else {
+        streamRef.current.getAudioTracks().forEach(track => track.enabled = true);
+      }
     }
   }, [isMuted]);
 
-  // Create peers when users list changes
-  useEffect(() => {
-    if (!socketRef.current || !streamRef.current || view !== 'room') return;
-
-    users.forEach(user => {
-      if (user.id !== socketRef.current.id && !peersRef.current[user.id]) {
-        console.log('Creating peer for user:', user.name);
-        const peer = createPeer(true, user.id, socketRef.current);
-        peersRef.current[user.id] = peer;
-      }
-    });
-
-    // Clean up peers for users who left
-    Object.keys(peersRef.current).forEach(peerId => {
-      if (!users.find(u => u.id === peerId)) {
-        console.log('Destroying peer:', peerId);
-        peersRef.current[peerId].destroy();
-        delete peersRef.current[peerId];
-      }
-    });
-  }, [users, view]);
-
-  function createPeer(initiator, remoteId, socket) {
-    const peer = new Peer({
-      initiator,
-      trickle: false,
-      stream: streamRef.current,
-    });
-
-    peer.on('signal', signal => {
-      console.log('Sending signal to:', remoteId);
-      socket.emit('signal', { to: remoteId, signal });
-    });
-
-    peer.on('stream', remoteStream => {
-      console.log('Received remote stream from:', remoteId);
-      addAudioStream(remoteId, remoteStream);
-    });
-
-    peer.on('error', err => {
-      console.error('Peer error:', err);
-    });
-
-    return peer;
-  }
-
-  function addAudioStream(peerId, stream) {
-    const existingAudio = document.getElementById(`audio-${peerId}`);
-    if (existingAudio) {
-      existingAudio.remove();
+  function playAudio(userId, audioData) {
+    if (!audioPlayersRef.current[userId]) {
+      const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+      audioPlayersRef.current[userId] = { context: audioContext, queue: [], isPlaying: false };
     }
 
-    const audio = document.createElement('audio');
-    audio.id = `audio-${peerId}`;
-    audio.srcObject = stream;
-    audio.autoplay = true;
+    const player = audioPlayersRef.current[userId];
     
-    if (audioContainerRef.current) {
-      audioContainerRef.current.appendChild(audio);
-    }
+    // Convert received data to Float32Array
+    const float32Array = new Float32Array(audioData);
+    
+    // Create audio buffer from raw PCM data
+    const audioBuffer = player.context.createBuffer(1, float32Array.length, player.context.sampleRate);
+    audioBuffer.getChannelData(0).set(float32Array);
+    
+    // Play immediately
+    const source = player.context.createBufferSource();
+    source.buffer = audioBuffer;
+    source.connect(player.context.destination);
+    source.start(0);
   }
 
   const handleSetUsername = (e) => {
@@ -196,7 +155,44 @@ export default function App() {
       .then(stream => {
         console.log('Got user media');
         streamRef.current = stream;
-        stream.getAudioTracks()[0].enabled = !isMuted;
+        
+        // Setup audio analysis for volume meter
+        const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+        const analyser = audioContext.createAnalyser();
+        const source = audioContext.createMediaStreamSource(stream);
+        source.connect(analyser);
+        analyser.fftSize = 256;
+        
+        audioContextRef.current = audioContext;
+        analyserRef.current = analyser;
+        
+        // Start monitoring microphone level
+        const dataArray = new Uint8Array(analyser.frequencyBinCount);
+        const updateLevel = () => {
+          analyser.getByteFrequencyData(dataArray);
+          const average = dataArray.reduce((a, b) => a + b) / dataArray.length;
+          const normalizedLevel = Math.min(100, (average / 128) * 100);
+          setMicLevel(normalizedLevel);
+          animationFrameRef.current = requestAnimationFrame(updateLevel);
+        };
+        updateLevel();
+
+        // Use ScriptProcessor to capture raw PCM audio data
+        const scriptProcessor = audioContext.createScriptProcessor(4096, 1, 1);
+        source.connect(scriptProcessor);
+        scriptProcessor.connect(audioContext.destination);
+        
+        scriptProcessor.onaudioprocess = (audioProcessingEvent) => {
+          if (!isMuted && socketRef.current) {
+            const inputBuffer = audioProcessingEvent.inputBuffer;
+            const inputData = inputBuffer.getChannelData(0);
+            // Send raw PCM data as Float32Array
+            socketRef.current.emit('voice-data', Array.from(inputData));
+          }
+        };
+        
+        mediaRecorderRef.current = scriptProcessor;
+        
         socketRef.current.emit('join', { room: roomName, user: username });
         setView('room');
       })
@@ -211,9 +207,27 @@ export default function App() {
       streamRef.current.getTracks().forEach(track => track.stop());
       streamRef.current = null;
     }
-    Object.values(peersRef.current).forEach(peer => peer.destroy());
-    peersRef.current = {};
     
+    if (mediaRecorderRef.current) {
+      mediaRecorderRef.current.disconnect();
+      mediaRecorderRef.current = null;
+    }
+    
+    // Cleanup audio analysis
+    if (animationFrameRef.current) {
+      cancelAnimationFrame(animationFrameRef.current);
+    }
+    if (audioContextRef.current) {
+      audioContextRef.current.close();
+    }
+    
+    // Cleanup audio players
+    Object.values(audioPlayersRef.current).forEach(player => {
+      player.context.close();
+    });
+    audioPlayersRef.current = {};
+    
+    setMicLevel(0);
     setView('lobby');
     setCurrentRoom(null);
     setUsers([]);
@@ -233,7 +247,6 @@ export default function App() {
   if (view === 'username') {
     return (
       <div className="min-h-screen bg-gradient-to-br from-slate-950 via-blue-950 to-indigo-950 text-white flex flex-col items-center justify-center p-4 relative overflow-hidden">
-        {/* Animated background elements */}
         <div className="absolute inset-0 overflow-hidden pointer-events-none">
           <div className="absolute top-20 left-10 w-72 h-72 bg-blue-500/10 rounded-full blur-3xl animate-pulse"></div>
           <div className="absolute bottom-20 right-10 w-96 h-96 bg-purple-500/10 rounded-full blur-3xl animate-pulse delay-700"></div>
@@ -294,18 +307,16 @@ export default function App() {
     );
   }
 
-  // Lobby view
+  // Lobby view - same as before...
   if (view === 'lobby') {
     return (
       <div className="min-h-screen bg-gradient-to-br from-slate-950 via-blue-950 to-indigo-950 text-white p-6 relative overflow-hidden">
-        {/* Animated background */}
         <div className="absolute inset-0 overflow-hidden pointer-events-none">
           <div className="absolute top-0 left-1/4 w-96 h-96 bg-blue-500/10 rounded-full blur-3xl animate-pulse"></div>
           <div className="absolute bottom-0 right-1/4 w-96 h-96 bg-purple-500/10 rounded-full blur-3xl animate-pulse delay-1000"></div>
         </div>
 
         <div className="max-w-7xl mx-auto relative z-10">
-          {/* Header */}
           <div className="mb-10">
             <div className="flex justify-between items-start mb-6">
               <div className="flex-1">
@@ -337,7 +348,6 @@ export default function App() {
               </button>
             </div>
 
-            {/* Stats Bar */}
             <div className="grid grid-cols-3 gap-4">
               <div className="bg-gradient-to-br from-slate-800/60 to-slate-900/60 backdrop-blur-xl rounded-xl p-4 border border-slate-700/50">
                 <div className="text-3xl font-bold text-blue-400">{rooms.length}</div>
@@ -348,13 +358,12 @@ export default function App() {
                 <div className="text-sm text-gray-400">People Chatting</div>
               </div>
               <div className="bg-gradient-to-br from-slate-800/60 to-slate-900/60 backdrop-blur-xl rounded-xl p-4 border border-slate-700/50">
-                <div className="text-3xl font-bold text-purple-400">HD</div>
-                <div className="text-sm text-gray-400">Voice Quality</div>
+                <div className="text-3xl font-bold text-purple-400">Server</div>
+                <div className="text-sm text-gray-400">Voice Mode</div>
               </div>
             </div>
           </div>
 
-          {/* Create Room Modal */}
           {showCreateRoom && (
             <div className="fixed inset-0 bg-black/70 backdrop-blur-md flex items-center justify-center z-50 animate-fade-in" onClick={() => setShowCreateRoom(false)}>
               <div className="bg-gradient-to-br from-slate-800 to-slate-900 p-8 rounded-2xl shadow-2xl w-full max-w-md border-2 border-slate-700 transform animate-scale-in" onClick={(e) => e.stopPropagation()}>
@@ -390,7 +399,6 @@ export default function App() {
             </div>
           )}
 
-          {/* Rooms Grid */}
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
             {rooms.length === 0 ? (
               <div className="col-span-full">
@@ -461,17 +469,15 @@ export default function App() {
     );
   }
 
-  // Room view
+  // Room view - same UI, no P2P code
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-950 via-blue-950 to-indigo-950 text-white p-6 relative overflow-hidden">
-      {/* Animated background */}
       <div className="absolute inset-0 overflow-hidden pointer-events-none">
         <div className="absolute top-20 right-20 w-96 h-96 bg-blue-500/10 rounded-full blur-3xl animate-pulse"></div>
         <div className="absolute bottom-20 left-20 w-96 h-96 bg-purple-500/10 rounded-full blur-3xl animate-pulse delay-1000"></div>
       </div>
 
       <div className="max-w-7xl mx-auto relative z-10">
-        {/* Header */}
         <div className="bg-gradient-to-br from-slate-800/80 to-slate-900/80 backdrop-blur-xl rounded-2xl p-6 mb-6 border-2 border-slate-700/50 shadow-2xl">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-4">
@@ -500,7 +506,6 @@ export default function App() {
         </div>
         
         <div className="grid grid-cols-1 lg:grid-cols-4 gap-6 mb-6">
-          {/* Users Panel */}
           <div className="lg:col-span-1 bg-gradient-to-br from-slate-800/80 to-slate-900/80 backdrop-blur-xl rounded-2xl p-6 border-2 border-slate-700/50 shadow-xl">
             <div className="flex items-center gap-3 mb-6">
               <div className="text-3xl">👥</div>
@@ -534,7 +539,6 @@ export default function App() {
             </div>
           </div>
           
-          {/* Chat Panel */}
           <div className="lg:col-span-3 bg-gradient-to-br from-slate-800/80 to-slate-900/80 backdrop-blur-xl rounded-2xl p-6 border-2 border-slate-700/50 shadow-xl flex flex-col">
             <div className="flex items-center gap-3 mb-6">
               <div className="text-3xl">💬</div>
@@ -548,11 +552,7 @@ export default function App() {
               {messages.map((m, i) => (
                 <div 
                   key={i} 
-                  className={`animate-slide-in ${
-                    m.user === 'system' 
-                      ? 'text-center' 
-                      : ''
-                  }`}
+                  className={`animate-slide-in ${m.user === 'system' ? 'text-center' : ''}`}
                   style={{ animationDelay: `${i * 20}ms` }}
                 >
                   {m.user === 'system' ? (
@@ -592,15 +592,14 @@ export default function App() {
           </div>
         </div>
         
-        {/* Voice Controls */}
         <div className="bg-gradient-to-br from-slate-800/80 to-slate-900/80 backdrop-blur-xl rounded-2xl p-8 border-2 border-slate-700/50 shadow-xl">
-          <div className="flex items-center justify-between">
+          <div className="flex items-center justify-between mb-6">
             <div className="flex items-center gap-6">
               <div className="text-5xl">{isMuted ? '🔇' : '🎤'}</div>
               <div>
                 <h3 className="text-2xl font-bold text-white mb-1">Your Microphone</h3>
                 <p className="text-gray-400">
-                  {isMuted ? 'Currently muted' : 'Live and active'}
+                  {isMuted ? 'Currently muted' : 'Broadcasting to server'}
                 </p>
               </div>
             </div>
@@ -616,10 +615,35 @@ export default function App() {
               <span>{isMuted ? 'Turn On' : 'Turn Off'}</span>
             </button>
           </div>
+          
+          <div className="mt-6">
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-sm text-gray-400">Volume Level</span>
+              <span className="text-sm font-mono text-blue-400">{Math.round(micLevel)}%</span>
+            </div>
+            <div className="h-4 bg-slate-900/80 rounded-full overflow-hidden border-2 border-slate-700/50">
+              <div 
+                className={`h-full transition-all duration-75 rounded-full ${
+                  isMuted 
+                    ? 'bg-gradient-to-r from-gray-600 to-gray-700'
+                    : micLevel > 70 
+                      ? 'bg-gradient-to-r from-green-500 via-yellow-500 to-red-500'
+                      : micLevel > 30
+                        ? 'bg-gradient-to-r from-green-500 to-yellow-500'
+                        : 'bg-gradient-to-r from-green-600 to-green-500'
+                } shadow-lg`}
+                style={{ 
+                  width: `${isMuted ? 0 : micLevel}%`,
+                  boxShadow: isMuted ? 'none' : '0 0 20px rgba(34, 197, 94, 0.5)'
+                }}
+              />
+            </div>
+            <div className="flex justify-between mt-1 text-xs text-gray-500">
+              <span>Quiet</span>
+              <span>Loud</span>
+            </div>
+          </div>
         </div>
-        
-        {/* Hidden audio container */}
-        <div ref={audioContainerRef} className="hidden"></div>
       </div>
     </div>
   );
