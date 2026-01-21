@@ -34,7 +34,7 @@
       </section>
       <section class="glass-card glass-users">
         <h2>Kullanıcılar</h2>
-        <div id="users" class="glass-user-list"></div>
+        <ul id="user-list" class="glass-user-list"></ul>
       </section>
       <section class="glass-card glass-audio">
         <h2>Ses</h2>
@@ -417,21 +417,30 @@
     }
 
     function refreshUsersList(){
-      const el = document.getElementById('users');
+      const el = document.getElementById('user-list');
+      if (!el) return;
+      el.innerHTML = '';
       const ids = Object.keys(peers);
-      const lines = [];
       // show current user first (if available)
       if (socket && socket.id) {
         const display = myName || socketNames[socket.id] || socket.id;
-        lines.push('• ' + display + '  (you)');
+        const li = document.createElement('li');
+        li.textContent = '• ' + display + '  (you)';
+        el.appendChild(li);
       }
       // then show other connected peers
       ids.forEach(id => {
         if (id === socket.id) return;
         const display = socketNames[id] || id;
-        lines.push('• ' + display);
+        const li = document.createElement('li');
+        li.textContent = '• ' + display;
+        el.appendChild(li);
       });
-      el.innerText = 'Bağlı Kullanıcılar:' + (lines.length ? '\n' + lines.join('\n') : '\n(hiç kimse)');
+      if (el.children.length === 0) {
+        const li = document.createElement('li');
+        li.textContent = '(hiç kimse)';
+        el.appendChild(li);
+      }
     }
 
     function setupAnalyzer(stream){
@@ -523,12 +532,17 @@
       const text = chatInput.value && chatInput.value.trim();
       if (!text) return;
       if (!currentRoom) { setStatus('Önce bir odaya katılın.'); return; }
-      socket.emit('chat-message', { roomId: currentRoom, text });
+      socket.emit('chat-message', { roomId: currentRoom, text, fromName: myName || socketNames[socket.id] || socket.id });
       chatInput.value = '';
     };
 
     chatInput.addEventListener('keydown', (e) => {
       if (e.key === 'Enter') { e.preventDefault(); chatSend.click(); }
+    });
+
+    // Listen for chat-message event to display incoming messages
+    socket.on('chat-message', (msg) => {
+      appendChatMessage(msg.fromName || msg.from, msg.text, msg.ts, msg.fromId || msg.from);
     });
 
   </script>

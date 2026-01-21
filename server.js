@@ -51,6 +51,20 @@ io.on("connection", (socket) => {
 
   socket.on("get-rooms", () => {
     socket.emit("room-list", getRoomsArray());
+    });
+
+    // Send current user list for a room
+    socket.on('get-users', (roomId) => {
+      const room = io.sockets.adapter.rooms.get(roomId);
+      if (!room) {
+        socket.emit('user-list', { roomId, users: {} });
+        return;
+      }
+      const users = {};
+      for (const id of room) {
+        users[id] = socketNames.get(id) || null;
+      }
+      socket.emit('user-list', { roomId, users });
   });
 
   socket.on("create-room", (roomId) => {
