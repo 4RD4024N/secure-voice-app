@@ -1,14 +1,13 @@
 import { useState, useRef, useEffect } from 'react';
 import { io } from 'socket.io-client';
-import SimplePeer from 'simple-peer';
 
 const SOCKET_URL = window.location.origin;
 
 export default function App() {
-  // Check localStorage for saved username
-  const savedUsername = localStorage.getItem('voiceapp_username');
-  const [view, setView] = useState(savedUsername ? 'lobby' : 'username');
-  const [username, setUsername] = useState(savedUsername || '');
+  // Load saved username but don't auto-login
+  const savedUsername = localStorage.getItem('voiceapp_username') || '';
+  const [view, setView] = useState('username');
+  const [username, setUsername] = useState(savedUsername);
   const [currentRoom, setCurrentRoom] = useState(null);
   const [rooms, setRooms] = useState([]);
   const [users, setUsers] = useState([]);
@@ -25,8 +24,8 @@ export default function App() {
   const audioContextRef = useRef();
   const analyserRef = useRef();
   const animationFrameRef = useRef();
-  const peersRef = useRef({});
-  const audioElementsRef = useRef({});
+  const audioPlayersRef = useRef({});
+  const processorRef = useRef();
 
   // Connect to socket on mount
   useEffect(() => {
@@ -74,34 +73,7 @@ export default function App() {
 
     socket.on('users', (userList) => {
       console.log('Users updated:', userList);
-      setUsers((prevUsers) => {
-        const oldUserIds = prevUsers.map(u => u.id);
-        const newUserIds = userList.map(u => u.id);
-        
-        // Create peer connections for new users (only if we have a stream)
-        if (streamRef.current && socketRef.current) {
-          newUserIds.forEach(userId => {
-            if (!oldUserIds.includes(userId) && userId !== socketRef.current.id && !peersRef.current[userId]) {
-              console.log('Creating peer for new user:', userId);
-              createPeer(userId, true);
-            }
-          });
-          
-          // Remove peers for users who left
-          oldUserIds.forEach(userId => {
-            if (!newUserIds.includes(userId) && peersRef.current[userId]) {
-              console.log('Destroying peer for user who left:', userId);
-              peersRef.current[userId].destroy();
-              delete peersRef.current[userId];
-              if (audioElementsRef.current[userId]) {
-                delete audioElementsRef.current[userId];
-              }
-            }
-          });
-        }
-        
-        return userList;
-      });
+      setUsers(userList);
     });
 
     socket.on('message', (msg) => {
@@ -109,25 +81,10 @@ export default function App() {
       setMessages((msgs) => [...msgs, msg]);
     });
 
-    // WebRTC signaling
-    socket.on('offer', ({ from, offer, username: peerUsername }) => {
-      console.log('Received offer from:', from);
-      if (streamRef.current && !peersRef.current[from]) {
-        createPeer(from, false, offer);
-      }
-    });
-
-    socket.on('answer', ({ from, answer }) => {
-      console.log('Received answer from:', from);
-      if (peersRef.current[from]) {
-        peersRef.current[from].signal(answer);
-      }
-    });
-
-    socket.on('ice-candidate', ({ from, candidate }) => {
-      console.log('Received ICE candidate from:', from);
-      if (peersRef.current[from]) {
-        peersRef.current[from].signal(candidate);
+    // Server-relayed audio
+    socket.on('voice-data', ({ userId, audio }) => {
+      if (userId !== socket.id) {
+        playAudio(userId, audio);
       }
     });
 
@@ -149,99 +106,41 @@ export default function App() {
     }
   }, [isMuted]);
 
-  function createPeer(userId, initiator, incomingOffer = null) {
-    console.log(`Creating peer connection with ${userId}, initiator: ${initiator}`);
-    
-    if (!streamRef.current) {
-      console.error('No stream available for peer connection');
-      return;
-    }
-    
-    // Check if peer already exists to prevent duplicates
-    if (peersRef.current[userId]) {
-      console.log('Peer already exists for:', userId);
-      return;
-    }
-    
-    const peer = new SimplePeer({
-      initiator,
-      stream: streamRef.current,
-      trickle: true,
-      config: {
-        iceServers: [
-          { urls: 'stun:stun.l.google.com:19302' },
-          { urls: 'stun:stun1.l.google.com:19302' },
-        ]
-      }
-    });
-
-    peer.on('signal', (signal) => {
-      console.log(`Sending ${initiator ? 'offer' : 'answer'} to:`, userId);
-      if (initiator) {
-        socketRef.current.emit('offer', { to: userId, offer: signal });
-      } else {
-        socketRef.current.emit('answer', { to: userId, answer: signal });
-      }
-    });
-
-    peer.on('stream', (remoteStream) => {
-      console.log('Received remote stream from:', userId, remoteStream);
-      
-      // Create or update audio element for this peer
-      if (!audioElementsRef.current[userId]) {
-        const audio = new Audio();
-        audio.srcObject = remoteStream;
-        audio.volume = 1.0;
-        audio.autoplay = true;
-        audioElementsRef.current[userId] = audio;
-        
-        // Play the audio
-        const playPromise = audio.play();
-        if (playPromise !== undefined) {
-          playPromise
-            .then(() => {
-              console.log('Audio playing for user:', userId);
-            })
-            .catch(err => {
-              console.error('Error playing audio for user:', userId, err);
-              // Try again after a short delay
-              setTimeout(() => {
-                audio.play().catch(e => console.error('Retry failed:', e));
-              }, 100);
-            });
-        }
-      }
-    });
-
-    peer.on('connect', () => {
-      console.log('Peer connected:', userId);
-    });
-
-    peer.on('error', (err) => {
-      console.error('Peer error with', userId, ':', err);
-    });
-
-    peer.on('close', () => {
-      console.log('Peer connection closed:', userId);
-      delete peersRef.current[userId];
-      if (audioElementsRef.current[userId]) {
-        audioElementsRef.current[userId].pause();
-        audioElementsRef.current[userId].srcObject = null;
-        delete audioElementsRef.current[userId];
-      }
-    });
-
-    peersRef.current[userId] = peer;
-
-    // If receiving an offer, signal it to the peer
-    if (incomingOffer) {
-      console.log('Signaling incoming offer to peer:', userId);
-      peer.signal(incomingOffer);
-    }
-  }
-
   function playAudio(userId, audioData) {
-    // No longer needed - audio comes through WebRTC streams
+    if (!audioPlayersRef.current[userId]) {
+      const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+      audioPlayersRef.current[userId] = { 
+        context: audioContext, 
+        nextStartTime: audioContext.currentTime 
+      };
+    }
+
+    const player = audioPlayersRef.current[userId];
+    const context = player.context;
+    
+    // Convert received data to Float32Array
+    const float32Array = new Float32Array(audioData);
+    
+    // Create audio buffer
+    const audioBuffer = context.createBuffer(1, float32Array.length, context.sampleRate);
+    audioBuffer.getChannelData(0).set(float32Array);
+    
+    // Calculate duration
+    const duration = float32Array.length / context.sampleRate;
+    
+    // Create source
+    const source = context.createBufferSource();
+    source.buffer = audioBuffer;
+    source.connect(context.destination);
+    
+    // Reset if behind
+    if (player.nextStartTime < context.currentTime) {
+      player.nextStartTime = context.currentTime;
+    }
+    
+    // Play
+    source.start(player.nextStartTime);
+    player.nextStartTime += duration;
   }
 
   const handleSetUsername = (e) => {
@@ -298,6 +197,21 @@ export default function App() {
         };
         updateLevel();
 
+        // Capture and send audio - smaller buffer for lower latency
+        const processor = audioContext.createScriptProcessor(1024, 1, 1);
+        source.connect(processor);
+        processor.connect(audioContext.destination);
+        
+        processor.onaudioprocess = (e) => {
+          if (!isMuted && socketRef.current) {
+            const inputData = e.inputBuffer.getChannelData(0);
+            // Send as array for faster transmission
+            socketRef.current.emit('voice-data', Array.from(inputData));
+          }
+        };
+        
+        processorRef.current = processor;
+
         // Join the room via socket
         socketRef.current.emit('join', { room: roomName, user: username });
         setView('room');
@@ -309,12 +223,16 @@ export default function App() {
   };
 
   const leaveRoom = () => {
-    // Close all peer connections
-    Object.values(peersRef.current).forEach(peer => {
-      peer.destroy();
+    // Cleanup audio players
+    Object.values(audioPlayersRef.current).forEach(player => {
+      player.context.close();
     });
-    peersRef.current = {};
-    audioElementsRef.current = {};
+    audioPlayersRef.current = {};
+    
+    if (processorRef.current) {
+      processorRef.current.disconnect();
+      processorRef.current = null;
+    }
     
     if (streamRef.current) {
       streamRef.current.getTracks().forEach(track => track.stop());
@@ -449,6 +367,12 @@ export default function App() {
                       {connected ? 'Connected' : 'Disconnected'}
                     </span>
                   </div>
+                  <button
+                    onClick={handleLogout}
+                    className="px-4 py-2 rounded-full bg-red-600/20 hover:bg-red-600/40 border border-red-500/30 hover:border-red-500 transition-all duration-300 text-sm font-semibold text-red-400 hover:text-red-300 hover:shadow-lg hover:shadow-red-500/20"
+                  >
+                    Logout
+                  </button>
                 </div>
               </div>
               <button

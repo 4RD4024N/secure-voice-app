@@ -55,6 +55,7 @@ io.on('connection', (socket) => {
   });
 
   socket.on('join', ({ room, user }) => {
+    console.log('Join event - socket:', socket.id, 'room:', room, 'user:', user);
     currentRoom = room;
     username = user;
     socket.join(room);
@@ -68,28 +69,29 @@ io.on('connection', (socket) => {
     }
     
     rooms[room].users.push({ id: socket.id, name: user });
+    console.log('User joined room. currentRoom:', currentRoom, 'username:', username);
     io.to(room).emit('users', rooms[room].users);
     socket.to(room).emit('message', { user: 'system', text: `${user} joined!` });
     io.emit('room-updated', { roomName: room, userCount: rooms[room].users.length });
   });
 
   socket.on('message', (msg) => {
+    console.log('Message received from socket:', socket.id, 'currentRoom:', currentRoom, 'username:', username, 'message:', msg);
     if (currentRoom && username) {
       io.to(currentRoom).emit('message', { user: username, text: msg });
+    } else {
+      console.log('ERROR: Cannot send message - currentRoom:', currentRoom, 'username:', username);
     }
   });
 
-  // WebRTC signaling for P2P connections
-  socket.on('offer', ({ to, offer }) => {
-    io.to(to).emit('offer', { from: socket.id, offer, username });
-  });
-
-  socket.on('answer', ({ to, answer }) => {
-    io.to(to).emit('answer', { from: socket.id, answer });
-  });
-
-  socket.on('ice-candidate', ({ to, candidate }) => {
-    io.to(to).emit('ice-candidate', { from: socket.id, candidate });
+  // Voice data relay - optimized for low latency
+  socket.on('voice-data', (audioData) => {
+    if (currentRoom) {
+      socket.to(currentRoom).emit('voice-data', {
+        userId: socket.id,
+        audio: audioData
+      });
+    }
   });
 
   socket.on('disconnect', () => {
