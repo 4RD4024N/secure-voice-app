@@ -30,16 +30,13 @@ export default defineConfig({
     port: 5173,
     strictPort: false,
     cors: true,
+    allowedHosts: true, // Allow any host - critical for ngrok
     hmr: {
       protocol: 'wss',
       host: undefined,
       port: 443,
       clientPort: 443,
     },
-    preview: {
-      allowedHosts: 'true',
-    },
-    allowedHosts: 'true',
     watch: {
       usePolling: false,
     },
@@ -57,6 +54,7 @@ export default defineConfig({
     port: 5173,
     strictPort: false,
     cors: true,
+    allowedHosts: true, // Allow any host for preview mode
   },
   resolve: {
     alias: {
