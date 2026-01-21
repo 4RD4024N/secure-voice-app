@@ -72,6 +72,10 @@ io.on('connection', (socket) => {
     console.log('User joined room. currentRoom:', currentRoom, 'username:', username);
     io.to(room).emit('users', rooms[room].users);
     socket.to(room).emit('message', { user: 'system', text: `${user} joined!` });
+    
+    // Notify other users to initiate WebRTC connections
+    socket.to(room).emit('user-joined', { userId: socket.id });
+    
     io.emit('room-updated', { roomName: room, userCount: rooms[room].users.length });
   });
 
@@ -84,19 +88,19 @@ io.on('connection', (socket) => {
     }
   });
 
-  // Voice data relay - optimized for low latency
-  let voiceDataCount = 0;
-  socket.on('voice-data', (audioData) => {
-    if (currentRoom) {
-      voiceDataCount++;
-      if (voiceDataCount % 50 === 0) {
-        console.log('Voice data relayed:', voiceDataCount, 'packets from', username, 'in room', currentRoom);
-      }
-      socket.to(currentRoom).emit('voice-data', {
-        userId: socket.id,
-        audio: audioData
-      });
-    }
+  // WebRTC signaling
+  socket.on('offer', ({ to, offer }) => {
+    console.log('Relaying offer from', socket.id, 'to', to);
+    io.to(to).emit('offer', { from: socket.id, offer });
+  });
+
+  socket.on('answer', ({ to, answer }) => {
+    console.log('Relaying answer from', socket.id, 'to', to);
+    io.to(to).emit('answer', { from: socket.id, answer });
+  });
+
+  socket.on('ice-candidate', ({ to, candidate }) => {
+    io.to(to).emit('ice-candidate', { from: socket.id, candidate });
   });
 
   socket.on('disconnect', () => {
