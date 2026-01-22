@@ -19,9 +19,12 @@ export default function App() {
   const [micLevel, setMicLevel] = useState(0);
   const [isScreenSharing, setIsScreenSharing] = useState(false);
   const [screenSharer, setScreenSharer] = useState(null);
+  const [isNoiseCancellationEnabled, setIsNoiseCancellationEnabled] = useState(true);
+  const [noiseReductionLevel, setNoiseReductionLevel] = useState(0.8);
   
   const socketRef = useRef();
   const streamRef = useRef();
+  const processedStreamRef = useRef();
   const screenStreamRef = useRef();
   const audioContextRef = useRef();
   const analyserRef = useRef();
@@ -29,6 +32,9 @@ export default function App() {
   const peersRef = useRef({});
   const remoteStreamsRef = useRef({});
   const remoteVideoRef = useRef();
+  const gainNodeRef = useRef();
+  const noiseGateRef = useRef();
+  const processorRef = useRef();
 
   useEffect(() => {
     const socket = io(SOCKET_URL);
@@ -156,10 +162,14 @@ export default function App() {
 
     peersRef.current[userId] = pc;
 
-    // Add local stream
-    if (streamRef.current) {
-      streamRef.current.getTracks().forEach(track => {
-        pc.addTrack(track, streamRef.current);
+    // Add local stream (use processed stream if noise cancellation is enabled)
+    const streamToUse = isNoiseCancellationEnabled && processedStreamRef.current 
+      ? processedStreamRef.current 
+      : streamRef.current;
+    
+    if (streamToUse) {
+      streamToUse.getTracks().forEach(track => {
+        pc.addTrack(track, streamToUse);
       });
     }
 
@@ -231,12 +241,22 @@ export default function App() {
     
     console.log('Joining room:', roomName, 'as user:', username);
     
-    navigator.mediaDevices.getUserMedia({ audio: true, video: false })
+    navigator.mediaDevices.getUserMedia({
+      audio: {
+        echoCancellation: true,
+        noiseSuppression: isNoiseCancellationEnabled,
+        autoGainControl: true,
+        channelCount: 1,
+        sampleRate: 48000,
+        sampleSize: 16
+      },
+      video: false
+    })
       .then(stream => {
-        console.log('Got user media');
+        console.log('Got user media with noise cancellation:', isNoiseCancellationEnabled);
         streamRef.current = stream;
         
-        // Setup audio analysis for volume meter
+        // Setup audio analysis and processing for volume meter and noise reduction
         const audioContext = new (window.AudioContext || window.webkitAudioContext)();
         
         // Resume AudioContext (required by browsers for user-initiated audio)
@@ -248,11 +268,67 @@ export default function App() {
         
         const analyser = audioContext.createAnalyser();
         const source = audioContext.createMediaStreamSource(stream);
-        source.connect(analyser);
+        
+        // Create audio processing chain for noise reduction
+        const gainNode = audioContext.createGain();
+        const dynamicsCompressor = audioContext.createDynamicsCompressor();
+        const destination = audioContext.createMediaStreamDestination();
+        
+        // Configure compressor for noise reduction
+        dynamicsCompressor.threshold.setValueAtTime(-24, audioContext.currentTime);
+        dynamicsCompressor.knee.setValueAtTime(30, audioContext.currentTime);
+        dynamicsCompressor.ratio.setValueAtTime(12, audioContext.currentTime);
+        dynamicsCompressor.attack.setValueAtTime(0.003, audioContext.currentTime);
+        dynamicsCompressor.release.setValueAtTime(0.25, audioContext.currentTime);
+        
+        // Create noise gate effect
+        if (isNoiseCancellationEnabled) {
+          const scriptProcessor = audioContext.createScriptProcessor(4096, 1, 1);
+          let noiseFloor = -50; // dB
+          
+          scriptProcessor.onaudioprocess = function(event) {
+            const inputBuffer = event.inputBuffer;
+            const outputBuffer = event.outputBuffer;
+            const inputData = inputBuffer.getChannelData(0);
+            const outputData = outputBuffer.getChannelData(0);
+            
+            for (let i = 0; i < inputBuffer.length; i++) {
+              const sample = inputData[i];
+              const amplitude = Math.abs(sample);
+              const db = 20 * Math.log10(amplitude + 1e-10);
+              
+              // Apply noise gate
+              if (db > noiseFloor) {
+                outputData[i] = sample * noiseReductionLevel;
+              } else {
+                outputData[i] = sample * 0.1; // Heavily attenuate noise
+              }
+            }
+          };
+          
+          processorRef.current = scriptProcessor;
+          
+          // Connect processing chain
+          source.connect(gainNode);
+          gainNode.connect(scriptProcessor);
+          scriptProcessor.connect(dynamicsCompressor);
+          dynamicsCompressor.connect(destination);
+          dynamicsCompressor.connect(analyser);
+        } else {
+          // Direct connection without noise processing
+          source.connect(gainNode);
+          gainNode.connect(dynamicsCompressor);
+          dynamicsCompressor.connect(destination);
+          dynamicsCompressor.connect(analyser);
+        }
+        
         analyser.fftSize = 256;
         
+        // Store references
         audioContextRef.current = audioContext;
         analyserRef.current = analyser;
+        gainNodeRef.current = gainNode;
+        processedStreamRef.current = destination.stream;
         
         // Start monitoring microphone level
         const dataArray = new Uint8Array(analyser.frequencyBinCount);
@@ -293,9 +369,21 @@ export default function App() {
       streamRef.current = null;
     }
     
-    // Cleanup audio analysis
+    // Cleanup audio analysis and processing
     if (animationFrameRef.current) {
       cancelAnimationFrame(animationFrameRef.current);
+    }
+    if (processorRef.current) {
+      processorRef.current.disconnect();
+      processorRef.current = null;
+    }
+    if (gainNodeRef.current) {
+      gainNodeRef.current.disconnect();
+      gainNodeRef.current = null;
+    }
+    if (processedStreamRef.current) {
+      processedStreamRef.current.getTracks().forEach(track => track.stop());
+      processedStreamRef.current = null;
     }
     if (audioContextRef.current) {
       audioContextRef.current.close();
@@ -404,7 +492,9 @@ export default function App() {
       <div className="min-h-screen bg-gray-900 text-white flex flex-col items-center justify-center p-4">
         <div className="text-center mb-12">
           <div className="mb-6">
-            <div className="text-6xl mb-4">🎙️</div>
+            <div className="w-16 h-16 mx-auto bg-gradient-to-r from-blue-600 to-purple-600 rounded-full flex items-center justify-center mb-4">
+              <div className="text-white font-bold text-xl">V</div>
+            </div>
           </div>
           <h1 className="text-4xl font-bold mb-4 text-white">
             VoiceHub
@@ -447,7 +537,9 @@ export default function App() {
             <div className="flex justify-between items-start mb-6">
               <div className="flex-1">
                 <div className="flex items-center gap-3 mb-3">
-                  <div className="text-3xl">🎙️</div>
+                  <div className="w-8 h-8 bg-gradient-to-r from-blue-600 to-purple-600 rounded-lg flex items-center justify-center">
+                    <div className="text-white font-bold text-sm">V</div>
+                  </div>
                   <h1 className="text-3xl font-bold text-white">
                     VoiceHub
                   </h1>
@@ -475,7 +567,6 @@ export default function App() {
                 onClick={() => setShowCreateRoom(true)}
                 className="bg-blue-600 hover:bg-blue-700 rounded-lg px-4 py-2 font-medium transition-colors flex items-center gap-2"
               >
-                <span>+</span>
                 <span>Create Room</span>
               </button>
             </div>
@@ -532,14 +623,15 @@ export default function App() {
             {rooms.length === 0 ? (
               <div className="col-span-full">
                 <div className="bg-gray-800 rounded-lg p-12 text-center border border-gray-700">
-                  <div className="text-4xl mb-4">🎭</div>
+                  <div className="w-16 h-16 mx-auto bg-gray-700 rounded-full flex items-center justify-center mb-4">
+                    <div className="text-gray-400 font-bold text-lg">?</div>
+                  </div>
                   <p className="text-lg font-medium text-gray-300 mb-2">No rooms yet</p>
                   <p className="text-gray-400 mb-6">Create one and invite your friends to join!</p>
                   <button
                     onClick={() => setShowCreateRoom(true)}
                     className="bg-blue-600 hover:bg-blue-700 rounded-lg px-6 py-3 font-medium transition-colors inline-flex items-center gap-2"
                   >
-                    <span>+</span>
                     <span>Create Your First Room</span>
                   </button>
                 </div>
@@ -559,24 +651,24 @@ export default function App() {
                         </h3>
                       </div>
                       <div className="flex items-center gap-2 text-sm text-gray-400">
-                        <span>👤</span>
+                        <span className="text-xs bg-gray-700 px-2 py-1 rounded">Creator</span>
                         <span>{room.creator}</span>
                       </div>
                     </div>
                     {room.creator === username && (
                       <button
                         onClick={(e) => { e.stopPropagation(); deleteRoom(room.name); }}
-                        className="text-red-400 hover:text-red-300 transition-colors"
+                        className="text-red-400 hover:text-red-300 transition-colors px-2 py-1 rounded text-sm font-medium"
                         title="Delete room"
                       >
-                        🗑️
+                        Delete
                       </button>
                     )}
                   </div>
                   
                   <div className="flex items-center justify-between pt-3 border-t border-gray-700">
                     <div className="flex items-center gap-2 px-2 py-1 rounded bg-gray-700">
-                      <span>👥</span>
+                      <div className="w-3 h-3 bg-green-400 rounded-full"></div>
                       <span className="font-medium text-green-400">{room.userCount}</span>
                       <span className="text-sm text-gray-400">online</span>
                     </div>
@@ -603,7 +695,9 @@ export default function App() {
         <div className="bg-gray-800 rounded-lg p-4 mb-6 border border-gray-700">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-3">
-              <div className="text-3xl">🎙️</div>
+              <div className="w-10 h-10 bg-gradient-to-r from-blue-600 to-purple-600 rounded-lg flex items-center justify-center">
+                <div className="text-white font-bold">V</div>
+              </div>
               <div>
                 <div className="text-sm text-gray-400 mb-1">You're in</div>
                 <h2 className="text-xl font-bold text-white">
@@ -629,7 +723,9 @@ export default function App() {
         <div className="grid grid-cols-1 lg:grid-cols-4 gap-6 mb-6">
           <div className="lg:col-span-1 bg-gradient-to-br from-slate-800/80 to-slate-900/80 backdrop-blur-xl rounded-2xl p-6 border-2 border-slate-700/50 shadow-xl">
             <div className="flex items-center gap-3 mb-6">
-              <div className="text-3xl">👥</div>
+              <div className="w-8 h-8 bg-gradient-to-r from-slate-600 to-slate-700 rounded-lg flex items-center justify-center">
+                <div className="text-white font-bold text-sm">U</div>
+              </div>
               <div className="flex-1">
                 <h2 className="font-bold text-xl text-white">In this room</h2>
                 <p className="text-sm text-blue-400">{users.length} {users.length === 1 ? 'person' : 'people'}</p>
@@ -654,7 +750,11 @@ export default function App() {
                       <div className="text-xs bg-blue-600 px-2 py-0.5 rounded inline-block mt-1">You</div>
                     )}
                   </div>
-                  <div className="text-xl group-hover:scale-125 transition-transform">🎤</div>
+                  <div className="text-xl group-hover:scale-125 transition-transform">
+                    <div className="w-6 h-6 bg-green-500 rounded-full flex items-center justify-center">
+                      <div className="w-3 h-3 bg-white rounded-full"></div>
+                    </div>
+                  </div>
                 </div>
               ))}
             </div>
@@ -662,7 +762,9 @@ export default function App() {
           
           <div className="lg:col-span-3 bg-gray-800 rounded-lg p-4 border border-gray-700 flex flex-col">
             <div className="flex items-center gap-3 mb-4">
-              <div className="text-2xl">💬</div>
+              <div className="w-6 h-6 bg-gradient-to-r from-blue-600 to-purple-600 rounded-lg flex items-center justify-center">
+                <div className="text-white font-bold text-xs">C</div>
+              </div>
               <div className="flex-1">
                 <h2 className="font-bold text-lg text-white">Chat</h2>
                 <p className="text-sm text-gray-400">Send a message to everyone</p>
@@ -711,15 +813,31 @@ export default function App() {
         <div className="bg-gradient-to-br from-slate-800/80 to-slate-900/80 backdrop-blur-xl rounded-2xl p-8 border-2 border-slate-700/50 shadow-xl">
           <div className="flex items-center justify-between mb-6">
             <div className="flex items-center gap-6">
-              <div className="text-5xl">{isMuted ? '🔇' : '🎤'}</div>
+              <div className="w-12 h-12 bg-gradient-to-r from-blue-600 to-purple-600 rounded-full flex items-center justify-center">
+                <div className="text-white font-bold text-lg">{isMuted ? 'M' : 'LIVE'}</div>
+              </div>
               <div>
                 <h3 className="text-2xl font-bold text-white mb-1">Your Microphone</h3>
                 <p className="text-gray-400">
                   {isMuted ? 'Currently muted' : 'Broadcasting live'}
+                  {isNoiseCancellationEnabled && !isMuted && (
+                    <span className="ml-2 text-green-400 text-xs">Noise Canceled</span>
+                  )}
                 </p>
               </div>
             </div>
             <div className="flex items-center gap-4">
+              <button
+                onClick={() => setIsNoiseCancellationEnabled(prev => !prev)}
+                className={`rounded-xl px-6 py-4 font-bold text-sm transition-all duration-300 shadow-xl flex items-center gap-2 ${
+                  isNoiseCancellationEnabled
+                    ? 'bg-gradient-to-r from-green-600 to-emerald-600 hover:from-green-700 hover:to-emerald-700 hover:shadow-green-500/50'
+                    : 'bg-gradient-to-r from-gray-600 to-slate-600 hover:from-gray-700 hover:to-slate-700 hover:shadow-gray-500/50'
+                } hover:scale-105 transform`}
+              >
+                <div className="w-4 h-4 bg-white rounded-full"></div>
+                <span>{isNoiseCancellationEnabled ? 'Noise Cancel ON' : 'Noise Cancel OFF'}</span>
+              </button>
               <button
                 onClick={isScreenSharing ? stopScreenShare : startScreenShare}
                 className={`rounded-xl px-8 py-5 font-bold text-lg transition-all duration-300 shadow-xl flex items-center gap-3 ${
@@ -728,7 +846,9 @@ export default function App() {
                     : 'bg-gradient-to-r from-indigo-600 to-blue-600 hover:from-indigo-700 hover:to-blue-700 hover:shadow-indigo-500/50'
                 } hover:scale-105 transform`}
               >
-                <span className="text-3xl">{isScreenSharing ? '🛑' : '🖥️'}</span>
+                <div className="w-6 h-6 bg-white rounded flex items-center justify-center">
+                  <div className="w-4 h-3 bg-gray-800 rounded"></div>
+                </div>
                 <span>{isScreenSharing ? 'Stop Sharing' : 'Share Screen'}</span>
               </button>
               <button
@@ -739,34 +859,64 @@ export default function App() {
                 } hover:scale-105 transform`}
               onClick={() => setIsMuted(m => !m)}
             >
-              <span className="text-2xl">{isMuted ? '🔇' : '🎤'}</span>
+              <div className={`w-6 h-6 rounded-full flex items-center justify-center ${
+                isMuted ? 'bg-white' : 'bg-white'
+              }`}>
+                <div className={`w-3 h-3 rounded-full ${
+                  isMuted ? 'bg-red-600' : 'bg-green-600'
+                }`}></div>
+              </div>
               <span>{isMuted ? 'Turn On' : 'Turn Off'}</span>
             </button>
           </div>
           
-          <div className="mt-4">
-            <div className="flex items-center justify-between mb-2">
-              <span className="text-sm text-gray-400">Volume Level</span>
-              <span className="text-sm text-gray-300">{Math.round(micLevel)}%</span>
+          <div className="mt-4 space-y-4">
+            <div>
+              <div className="flex items-center justify-between mb-2">
+                <span className="text-sm text-gray-400">Volume Level</span>
+                <span className="text-sm text-gray-300">{Math.round(micLevel)}%</span>
+              </div>
+              <div className="h-3 bg-gray-700 rounded-full overflow-hidden border border-gray-600">
+                <div 
+                  className={`h-full transition-all duration-75 rounded-full ${
+                    isMuted 
+                      ? 'bg-gray-500'
+                      : micLevel > 70 
+                        ? 'bg-red-500'
+                        : micLevel > 30
+                          ? 'bg-yellow-500'
+                          : 'bg-green-500'
+                  }`}
+                  style={{ width: `${isMuted ? 0 : micLevel}%` }}
+                />
+              </div>
+              <div className="flex justify-between mt-1 text-xs text-gray-500">
+                <span>Quiet</span>
+                <span>Loud</span>
+              </div>
             </div>
-            <div className="h-3 bg-gray-700 rounded-full overflow-hidden border border-gray-600">
-              <div 
-                className={`h-full transition-all duration-75 rounded-full ${
-                  isMuted 
-                    ? 'bg-gray-500'
-                    : micLevel > 70 
-                      ? 'bg-red-500'
-                      : micLevel > 30
-                        ? 'bg-yellow-500'
-                        : 'bg-green-500'
-                }`}
-                style={{ width: `${isMuted ? 0 : micLevel}%` }}
-              />
-            </div>
-            <div className="flex justify-between mt-1 text-xs text-gray-500">
-              <span>Quiet</span>
-              <span>Loud</span>
-            </div>
+            
+            {isNoiseCancellationEnabled && (
+              <div>
+                <div className="flex items-center justify-between mb-2">
+                  <span className="text-sm text-gray-400">Noise Reduction Level</span>
+                  <span className="text-sm text-gray-300">{Math.round(noiseReductionLevel * 100)}%</span>
+                </div>
+                <input
+                  type="range"
+                  min="0.1"
+                  max="1"
+                  step="0.1"
+                  value={noiseReductionLevel}
+                  onChange={(e) => setNoiseReductionLevel(parseFloat(e.target.value))}
+                  className="w-full h-2 bg-gray-700 rounded-lg appearance-none cursor-pointer slider"
+                />
+                <div className="flex justify-between mt-1 text-xs text-gray-500">
+                  <span>Less</span>
+                  <span>More</span>
+                </div>
+              </div>
+            )}
           </div>
         </div>
         
@@ -774,7 +924,9 @@ export default function App() {
         {screenSharer && (
           <div className="mt-6 bg-gray-800 rounded-lg p-4 border border-gray-700">
             <div className="flex items-center gap-3 mb-4">
-              <div className="text-2xl">🖥️</div>
+              <div className="w-6 h-6 bg-gradient-to-r from-blue-600 to-purple-600 rounded flex items-center justify-center">
+                <div className="w-4 h-3 bg-white rounded"></div>
+              </div>
               <div>
                 <h3 className="text-lg font-bold text-white">Screen Share</h3>
                 <p className="text-sm text-gray-400">{screenSharer} is sharing their screen</p>

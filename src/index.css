@@ -44,6 +44,33 @@
   .custom-scrollbar::-webkit-scrollbar-thumb:hover {
     background: linear-gradient(to bottom, #2563eb, #7c3aed);
   }
+
+  /* Custom slider styling */
+  .slider::-webkit-slider-thumb {
+    appearance: none;
+    height: 20px;
+    width: 20px;
+    border-radius: 50%;
+    background: linear-gradient(to right, #3b82f6, #8b5cf6);
+    cursor: pointer;
+    border: 2px solid #1e293b;
+    box-shadow: 0 0 10px rgba(59, 130, 246, 0.5);
+  }
+
+  .slider::-webkit-slider-thumb:hover {
+    transform: scale(1.1);
+    box-shadow: 0 0 15px rgba(59, 130, 246, 0.8);
+  }
+
+  .slider::-moz-range-thumb {
+    height: 20px;
+    width: 20px;
+    border-radius: 50%;
+    background: linear-gradient(to right, #3b82f6, #8b5cf6);
+    cursor: pointer;
+    border: 2px solid #1e293b;
+    box-shadow: 0 0 10px rgba(59, 130, 246, 0.5);
+  }
 }
 
 @keyframes fadeIn {
