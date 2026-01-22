@@ -4,7 +4,6 @@ import { io } from 'socket.io-client';
 const SOCKET_URL = window.location.origin;
 
 export default function App() {
-  // Load saved username but don't auto-login
   const savedUsername = localStorage.getItem('voiceapp_username') || '';
   const [view, setView] = useState('username');
   const [username, setUsername] = useState(savedUsername);
@@ -31,7 +30,6 @@ export default function App() {
   const remoteStreamsRef = useRef({});
   const remoteVideoRef = useRef();
 
-  // Connect to socket on mount
   useEffect(() => {
     const socket = io(SOCKET_URL);
     socketRef.current = socket;
@@ -85,8 +83,6 @@ export default function App() {
       setMessages((msgs) => [...msgs, msg]);
     });
 
-    // Server-relayed audio
-    // WebRTC signaling
     socket.on('user-joined', ({ userId }) => {
       console.log('User joined, creating offer for:', userId);
       createPeerConnection(userId, true);
@@ -138,7 +134,6 @@ export default function App() {
     };
   }, []);
 
-  // Handle muting
   useEffect(() => {
     if (streamRef.current) {
       streamRef.current.getAudioTracks().forEach(track => {
@@ -185,6 +180,7 @@ export default function App() {
         console.log('Received video track (screen share)');
         if (remoteVideoRef.current) {
           remoteVideoRef.current.srcObject = remoteStream;
+          remoteVideoRef.current.play().catch(e => console.log('Video play error:', e));
         }
       }
     };
@@ -336,17 +332,26 @@ export default function App() {
       // Notify others that screen sharing started
       socketRef.current.emit('screen-share-started', { username });
       
-      // Add screen track to all existing peer connections
-      Object.values(peersRef.current).forEach(pc => {
+      // Add screen track to all existing peer connections and renegotiate
+      for (const [userId, pc] of Object.entries(peersRef.current)) {
         const videoTrack = screenStream.getVideoTracks()[0];
         const sender = pc.getSenders().find(s => s.track?.kind === 'video');
         
         if (sender) {
-          sender.replaceTrack(videoTrack);
+          await sender.replaceTrack(videoTrack);
         } else {
           pc.addTrack(videoTrack, screenStream);
         }
-      });
+        
+        // Renegotiate the connection to ensure video track is properly sent
+        try {
+          const offer = await pc.createOffer();
+          await pc.setLocalDescription(offer);
+          socketRef.current.emit('offer', { to: userId, offer });
+        } catch (err) {
+          console.error('Error renegotiating for user', userId, ':', err);
+        }
+      }
       
       // Handle when user stops sharing via browser UI
       screenStream.getVideoTracks()[0].onended = () => {
@@ -368,11 +373,19 @@ export default function App() {
     setIsScreenSharing(false);
     socketRef.current.emit('screen-share-stopped');
     
-    // Remove video tracks from all peer connections
-    Object.values(peersRef.current).forEach(pc => {
+    // Remove video tracks from all peer connections and renegotiate
+    Object.entries(peersRef.current).forEach(async ([userId, pc]) => {
       const sender = pc.getSenders().find(s => s.track?.kind === 'video');
       if (sender) {
-        pc.removeTrack(sender);
+        try {
+          pc.removeTrack(sender);
+          // Renegotiate after removing track
+          const offer = await pc.createOffer();
+          await pc.setLocalDescription(offer);
+          socketRef.current.emit('offer', { to: userId, offer });
+        } catch (err) {
+          console.error('Error renegotiating after removing video track for user', userId, ':', err);
+        }
       }
     });
   };
@@ -386,103 +399,73 @@ export default function App() {
     setView('username');
   };
 
-  // Username entry view
   if (view === 'username') {
     return (
-      <div className="min-h-screen bg-gradient-to-br from-slate-950 via-blue-950 to-indigo-950 text-white flex flex-col items-center justify-center p-4 relative overflow-hidden">
-        <div className="absolute inset-0 overflow-hidden pointer-events-none">
-          <div className="absolute top-20 left-10 w-72 h-72 bg-blue-500/10 rounded-full blur-3xl animate-pulse"></div>
-          <div className="absolute bottom-20 right-10 w-96 h-96 bg-purple-500/10 rounded-full blur-3xl animate-pulse delay-700"></div>
-          <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 w-[600px] h-[600px] bg-cyan-500/5 rounded-full blur-3xl"></div>
-        </div>
-
-        <div className="text-center mb-12 relative z-10 animate-fade-in">
-          <div className="mb-6 inline-block">
-            <div className="text-8xl mb-4 animate-bounce-slow">🎙️</div>
+      <div className="min-h-screen bg-gray-900 text-white flex flex-col items-center justify-center p-4">
+        <div className="text-center mb-12">
+          <div className="mb-6">
+            <div className="text-6xl mb-4">🎙️</div>
           </div>
-          <h1 className="text-6xl font-black mb-4 bg-gradient-to-r from-blue-400 via-cyan-400 to-purple-400 bg-clip-text text-transparent">
+          <h1 className="text-4xl font-bold mb-4 text-white">
             VoiceHub
           </h1>
-          <p className="text-xl text-gray-300 font-light">Connect with friends instantly</p>
-          <div className="flex gap-3 justify-center mt-6 text-sm text-gray-400">
-            <span className="flex items-center gap-1">
-              <span className="w-2 h-2 bg-green-400 rounded-full animate-pulse"></span>
-              Private
-            </span>
-            <span className="flex items-center gap-1">
-              <span className="w-2 h-2 bg-blue-400 rounded-full animate-pulse"></span>
-              Instant
-            </span>
-            <span className="flex items-center gap-1">
-              <span className="w-2 h-2 bg-purple-400 rounded-full animate-pulse"></span>
-              HD Voice
-            </span>
-          </div>
+          <p className="text-lg text-gray-300">Connect with friends instantly</p>
         </div>
 
-        <form onSubmit={handleSetUsername} className="relative z-10 w-full max-w-md">
-          <div className="bg-gradient-to-br from-slate-800/90 to-slate-900/90 backdrop-blur-xl p-10 rounded-2xl shadow-2xl border border-slate-700/50 relative overflow-hidden">
-            <div className="absolute inset-0 bg-gradient-to-br from-blue-500/5 to-purple-500/5"></div>
-            <div className="relative z-10">
-              <label className="block text-sm font-semibold text-gray-300 mb-3">What should we call you?</label>
-              <input
-                className="w-full p-4 rounded-xl bg-slate-900/50 border-2 border-slate-700 focus:outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-500/20 transition-all duration-300 text-white placeholder-gray-500"
-                placeholder="Enter your name"
-                value={username}
-                onChange={e => setUsername(e.target.value)}
-                required
-                autoFocus
-              />
-              <button 
-                className="w-full mt-6 bg-gradient-to-r from-blue-600 via-blue-500 to-cyan-500 hover:from-blue-700 hover:via-blue-600 hover:to-cyan-600 rounded-xl p-4 font-bold text-lg transition-all duration-300 shadow-lg hover:shadow-blue-500/50 hover:scale-105 transform" 
-                type="submit"
-              >
-                Enter VoiceHub →
-              </button>
-            </div>
+        <form onSubmit={handleSetUsername} className="w-full max-w-md">
+          <div className="bg-gray-800 p-8 rounded-lg shadow-lg border border-gray-700">
+            <label className="block text-sm font-medium text-gray-300 mb-3">What should we call you?</label>
+            <input
+              className="w-full p-3 rounded-lg bg-gray-700 border border-gray-600 focus:outline-none focus:border-blue-500 text-white placeholder-gray-400"
+              placeholder="Enter your name"
+              value={username}
+              onChange={e => setUsername(e.target.value)}
+              required
+              autoFocus
+            />
+            <button 
+              className="w-full mt-4 bg-blue-600 hover:bg-blue-700 rounded-lg p-3 font-medium transition-colors" 
+              type="submit"
+            >
+              Enter VoiceHub
+            </button>
           </div>
         </form>
 
-        <div className="mt-8 text-center text-sm text-gray-500 relative z-10">
+        <div className="mt-6 text-center text-sm text-gray-500">
           <p>Create rooms, chat with friends, no sign up needed</p>
         </div>
       </div>
     );
   }
 
-  // Lobby view - same as before...
   if (view === 'lobby') {
     return (
-      <div className="min-h-screen bg-gradient-to-br from-slate-950 via-blue-950 to-indigo-950 text-white p-6 relative overflow-hidden">
-        <div className="absolute inset-0 overflow-hidden pointer-events-none">
-          <div className="absolute top-0 left-1/4 w-96 h-96 bg-blue-500/10 rounded-full blur-3xl animate-pulse"></div>
-          <div className="absolute bottom-0 right-1/4 w-96 h-96 bg-purple-500/10 rounded-full blur-3xl animate-pulse delay-1000"></div>
-        </div>
-
-        <div className="max-w-7xl mx-auto relative z-10">
-          <div className="mb-10">
+      <div className="min-h-screen bg-gray-900 text-white p-6">
+        <div className="max-w-6xl mx-auto">
+          <div className="mb-8">
             <div className="flex justify-between items-start mb-6">
               <div className="flex-1">
-                <div className="flex items-center gap-4 mb-3">
-                  <div className="text-5xl">🎙️</div>
-                  <h1 className="text-5xl font-black bg-gradient-to-r from-blue-400 via-cyan-400 to-purple-400 bg-clip-text text-transparent">
+                <div className="flex items-center gap-3 mb-3">
+                  <div className="text-3xl">🎙️</div>
+                  <h1 className="text-3xl font-bold text-white">
                     VoiceHub
                   </h1>
                 </div>
-                <div className="flex items-center gap-3 ml-1">
-                  <div className="px-4 py-2 rounded-full bg-gradient-to-r from-blue-600/20 to-purple-600/20 border border-blue-500/30">
-                    <span className="text-sm">👋 Welcome, </span>
-                    <span className="text-sm font-bold text-blue-400">{username}</span>
+                <div className="flex items-center gap-3">
+                  <div className="px-3 py-1 rounded-full bg-gray-700 border border-gray-600">
+                    <span className="text-sm">Welcome, </span>
+                    <span className="text-sm font-medium text-blue-400">{username}</span>
                   </div>
-                  <div className={`px-4 py-2 rounded-full ${connected ? 'bg-green-500/20 border-green-500/30' : 'bg-red-500/20 border-red-500/30'} border`}>
+                  <div className={`px-3 py-1 rounded-full ${connected ? 'bg-green-900 border-green-700' : 'bg-red-900 border-red-700'} border`}>
                     <span className="text-sm flex items-center gap-2">
-                      <span className={`w-2 h-2 rounded-full ${connected ? 'bg-green-400' : 'bg-red-400'} animate-pulse`}></span>
+                      <span className={`w-2 h-2 rounded-full ${connected ? 'bg-green-400' : 'bg-red-400'}`}></span>
                       {connected ? 'Connected' : 'Disconnected'}
                     </span>
                   </div>
                   <button
                     onClick={handleLogout}
-                    className="px-4 py-2 rounded-full bg-red-600/20 hover:bg-red-600/40 border border-red-500/30 hover:border-red-500 transition-all duration-300 text-sm font-semibold text-red-400 hover:text-red-300 hover:shadow-lg hover:shadow-red-500/20"
+                    className="bg-red-600 hover:bg-red-700 rounded-lg px-3 py-1 text-sm font-medium transition-colors"
                   >
                     Logout
                   </button>
@@ -490,40 +473,37 @@ export default function App() {
               </div>
               <button
                 onClick={() => setShowCreateRoom(true)}
-                className="group bg-gradient-to-r from-green-600 via-emerald-600 to-teal-600 hover:from-green-700 hover:via-emerald-700 hover:to-teal-700 rounded-xl px-8 py-4 font-bold transition-all duration-300 shadow-xl hover:shadow-green-500/50 hover:scale-105 transform flex items-center gap-2"
+                className="bg-blue-600 hover:bg-blue-700 rounded-lg px-4 py-2 font-medium transition-colors flex items-center gap-2"
               >
-                <span className="text-2xl group-hover:rotate-90 transition-transform duration-300">+</span>
+                <span>+</span>
                 <span>Create Room</span>
               </button>
             </div>
 
             <div className="grid grid-cols-3 gap-4">
-              <div className="bg-gradient-to-br from-slate-800/60 to-slate-900/60 backdrop-blur-xl rounded-xl p-4 border border-slate-700/50">
-                <div className="text-3xl font-bold text-blue-400">{rooms.length}</div>
+              <div className="bg-gray-800 rounded-lg p-4 border border-gray-700">
+                <div className="text-2xl font-bold text-blue-400">{rooms.length}</div>
                 <div className="text-sm text-gray-400">Rooms Available</div>
               </div>
-              <div className="bg-gradient-to-br from-slate-800/60 to-slate-900/60 backdrop-blur-xl rounded-xl p-4 border border-slate-700/50">
-                <div className="text-3xl font-bold text-green-400">{rooms.reduce((acc, r) => acc + r.userCount, 0)}</div>
+              <div className="bg-gray-800 rounded-lg p-4 border border-gray-700">
+                <div className="text-2xl font-bold text-green-400">{rooms.reduce((acc, r) => acc + r.userCount, 0)}</div>
                 <div className="text-sm text-gray-400">People Chatting</div>
               </div>
-              <div className="bg-gradient-to-br from-slate-800/60 to-slate-900/60 backdrop-blur-xl rounded-xl p-4 border border-slate-700/50">
-                <div className="text-3xl font-bold text-purple-400">Server</div>
+              <div className="bg-gray-800 rounded-lg p-4 border border-gray-700">
+                <div className="text-2xl font-bold text-purple-400">Server</div>
                 <div className="text-sm text-gray-400">Voice Mode</div>
               </div>
             </div>
           </div>
 
           {showCreateRoom && (
-            <div className="fixed inset-0 bg-black/70 backdrop-blur-md flex items-center justify-center z-50 animate-fade-in" onClick={() => setShowCreateRoom(false)}>
-              <div className="bg-gradient-to-br from-slate-800 to-slate-900 p-8 rounded-2xl shadow-2xl w-full max-w-md border-2 border-slate-700 transform animate-scale-in" onClick={(e) => e.stopPropagation()}>
-                <div className="flex items-center gap-3 mb-6">
-                  <div className="text-4xl">✨</div>
-                  <h2 className="text-3xl font-bold bg-gradient-to-r from-green-400 to-cyan-400 bg-clip-text text-transparent">Create a Room</h2>
-                </div>
-                <div className="mb-6">
-                  <label className="block text-sm font-semibold text-gray-300 mb-2">Name your room</label>
+            <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={() => setShowCreateRoom(false)}>
+              <div className="bg-gray-800 p-6 rounded-lg shadow-lg w-full max-w-md border border-gray-700" onClick={(e) => e.stopPropagation()}>
+                <h2 className="text-xl font-bold mb-4 text-white">Create a Room</h2>
+                <div className="mb-4">
+                  <label className="block text-sm font-medium text-gray-300 mb-2">Room name</label>
                   <input
-                    className="w-full p-4 rounded-xl bg-slate-900/80 border-2 border-slate-700 focus:outline-none focus:border-green-500 focus:ring-4 focus:ring-green-500/20 transition-all text-white placeholder-gray-500"
+                    className="w-full p-3 rounded-lg bg-gray-700 border border-gray-600 focus:outline-none focus:border-blue-500 text-white placeholder-gray-400"
                     placeholder="Friends Hangout"
                     value={newRoomName}
                     onChange={e => setNewRoomName(e.target.value)}
@@ -533,13 +513,13 @@ export default function App() {
                 <div className="flex gap-3">
                   <button
                     onClick={() => setShowCreateRoom(false)}
-                    className="flex-1 bg-slate-700 hover:bg-slate-600 rounded-xl p-4 font-semibold transition-all duration-300"
+                    className="flex-1 bg-gray-600 hover:bg-gray-500 rounded-lg p-3 font-medium transition-colors"
                   >
                     Cancel
                   </button>
                   <button
                     onClick={createRoom}
-                    className="flex-1 bg-gradient-to-r from-green-600 to-teal-600 hover:from-green-700 hover:to-teal-700 rounded-xl p-4 font-bold transition-all duration-300 shadow-lg hover:shadow-green-500/50"
+                    className="flex-1 bg-blue-600 hover:bg-blue-700 rounded-lg p-3 font-medium transition-colors"
                   >
                     Create Room
                   </button>
@@ -551,15 +531,15 @@ export default function App() {
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
             {rooms.length === 0 ? (
               <div className="col-span-full">
-                <div className="bg-gradient-to-br from-slate-800/40 to-slate-900/40 backdrop-blur-xl rounded-2xl p-16 text-center border border-slate-700/50">
-                  <div className="text-7xl mb-6 opacity-50">🎭</div>
-                  <p className="text-2xl font-bold text-gray-300 mb-2">No rooms yet</p>
-                  <p className="text-gray-400 mb-8">Create one and invite your friends to join!</p>
+                <div className="bg-gray-800 rounded-lg p-12 text-center border border-gray-700">
+                  <div className="text-4xl mb-4">🎭</div>
+                  <p className="text-lg font-medium text-gray-300 mb-2">No rooms yet</p>
+                  <p className="text-gray-400 mb-6">Create one and invite your friends to join!</p>
                   <button
                     onClick={() => setShowCreateRoom(true)}
-                    className="bg-gradient-to-r from-green-600 to-teal-600 hover:from-green-700 hover:to-teal-700 rounded-xl px-8 py-3 font-bold transition-all duration-300 shadow-lg hover:shadow-green-500/50 inline-flex items-center gap-2"
+                    className="bg-blue-600 hover:bg-blue-700 rounded-lg px-6 py-3 font-medium transition-colors inline-flex items-center gap-2"
                   >
-                    <span className="text-xl">+</span>
+                    <span>+</span>
                     <span>Create Your First Room</span>
                   </button>
                 </div>
@@ -568,14 +548,13 @@ export default function App() {
               rooms.map((room, idx) => (
                 <div 
                   key={room.name} 
-                  className="group bg-gradient-to-br from-slate-800/80 to-slate-900/80 backdrop-blur-xl rounded-2xl p-6 border-2 border-slate-700/50 hover:border-blue-500/50 transition-all duration-300 shadow-xl hover:shadow-blue-500/30 hover:scale-105 transform cursor-pointer"
-                  style={{ animationDelay: `${idx * 50}ms` }}
+                  className="bg-gray-800 rounded-lg p-4 border border-gray-700 hover:border-blue-500 transition-colors cursor-pointer"
                 >
                   <div className="flex justify-between items-start mb-4">
                     <div className="flex-1">
                       <div className="flex items-center gap-2 mb-2">
-                        <div className="w-3 h-3 bg-green-400 rounded-full animate-pulse"></div>
-                        <h3 className="text-2xl font-bold text-transparent bg-clip-text bg-gradient-to-r from-blue-400 to-cyan-400 group-hover:from-cyan-400 group-hover:to-purple-400 transition-all">
+                        <div className="w-2 h-2 bg-green-400 rounded-full"></div>
+                        <h3 className="text-lg font-bold text-white">
                           {room.name}
                         </h3>
                       </div>
@@ -587,7 +566,7 @@ export default function App() {
                     {room.creator === username && (
                       <button
                         onClick={(e) => { e.stopPropagation(); deleteRoom(room.name); }}
-                        className="text-2xl hover:scale-125 transition-transform duration-300 opacity-60 hover:opacity-100"
+                        className="text-red-400 hover:text-red-300 transition-colors"
                         title="Delete room"
                       >
                         🗑️
@@ -595,18 +574,17 @@ export default function App() {
                     )}
                   </div>
                   
-                  <div className="flex items-center justify-between pt-4 border-t border-slate-700/50">
-                    <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-slate-900/50">
-                      <span className="text-xl">👥</span>
-                      <span className="font-bold text-green-400">{room.userCount}</span>
+                  <div className="flex items-center justify-between pt-3 border-t border-gray-700">
+                    <div className="flex items-center gap-2 px-2 py-1 rounded bg-gray-700">
+                      <span>👥</span>
+                      <span className="font-medium text-green-400">{room.userCount}</span>
                       <span className="text-sm text-gray-400">online</span>
                     </div>
                     <button
                       onClick={() => joinRoom(room.name)}
-                      className="bg-gradient-to-r from-blue-600 to-purple-600 hover:from-blue-700 hover:to-purple-700 rounded-xl px-6 py-2 font-bold transition-all duration-300 shadow-lg group-hover:shadow-blue-500/50 flex items-center gap-2"
+                      className="bg-blue-600 hover:bg-blue-700 rounded-lg px-4 py-2 font-medium transition-colors"
                     >
-                      <span>Join</span>
-                      <span className="group-hover:translate-x-1 transition-transform">→</span>
+                      Join
                     </button>
                   </div>
                 </div>
@@ -618,37 +596,31 @@ export default function App() {
     );
   }
 
-  // Room view - same UI, no P2P code
-  return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-950 via-blue-950 to-indigo-950 text-white p-6 relative overflow-hidden">
-      <div className="absolute inset-0 overflow-hidden pointer-events-none">
-        <div className="absolute top-20 right-20 w-96 h-96 bg-blue-500/10 rounded-full blur-3xl animate-pulse"></div>
-        <div className="absolute bottom-20 left-20 w-96 h-96 bg-purple-500/10 rounded-full blur-3xl animate-pulse delay-1000"></div>
-      </div>
-
-      <div className="max-w-7xl mx-auto relative z-10">
-        <div className="bg-gradient-to-br from-slate-800/80 to-slate-900/80 backdrop-blur-xl rounded-2xl p-6 mb-6 border-2 border-slate-700/50 shadow-2xl">
+  if (view === 'room') {
+    return (
+    <div className="min-h-screen bg-gray-900 text-white p-6">
+      <div className="max-w-6xl mx-auto">
+        <div className="bg-gray-800 rounded-lg p-4 mb-6 border border-gray-700">
           <div className="flex items-center justify-between">
-            <div className="flex items-center gap-4">
-              <div className="text-4xl">🎙️</div>
+            <div className="flex items-center gap-3">
+              <div className="text-3xl">🎙️</div>
               <div>
                 <div className="text-sm text-gray-400 mb-1">You're in</div>
-                <h2 className="text-3xl font-black bg-gradient-to-r from-blue-400 via-cyan-400 to-purple-400 bg-clip-text text-transparent">
+                <h2 className="text-xl font-bold text-white">
                   {currentRoom}
                 </h2>
               </div>
             </div>
-            <div className="flex items-center gap-4">
-              <div className={`px-4 py-2 rounded-full ${connected ? 'bg-green-500/20 border-green-500/30' : 'bg-red-500/20 border-red-500/30'} border flex items-center gap-2`}>
-                <span className={`w-2 h-2 rounded-full ${connected ? 'bg-green-400' : 'bg-red-400'} animate-pulse`}></span>
-                <span className="text-sm font-semibold">{connected ? 'Connected' : 'Disconnected'}</span>
+            <div className="flex items-center gap-3">
+              <div className={`px-3 py-1 rounded-full ${connected ? 'bg-green-900 border-green-700' : 'bg-red-900 border-red-700'} border flex items-center gap-2`}>
+                <span className={`w-2 h-2 rounded-full ${connected ? 'bg-green-400' : 'bg-red-400'}`}></span>
+                <span className="text-sm">{connected ? 'Connected' : 'Disconnected'}</span>
               </div>
               <button 
-                className="bg-gradient-to-r from-red-600 to-rose-600 hover:from-red-700 hover:to-rose-700 rounded-xl px-6 py-3 font-bold transition-all duration-300 shadow-lg hover:shadow-red-500/50 flex items-center gap-2 group" 
+                className="bg-red-600 hover:bg-red-700 rounded-lg px-4 py-2 font-medium transition-colors" 
                 onClick={leaveRoom}
               >
-                <span className="group-hover:-translate-x-1 transition-transform">←</span>
-                <span>Leave Room</span>
+                Leave Room
               </button>
             </div>
           </div>
@@ -688,33 +660,29 @@ export default function App() {
             </div>
           </div>
           
-          <div className="lg:col-span-3 bg-gradient-to-br from-slate-800/80 to-slate-900/80 backdrop-blur-xl rounded-2xl p-6 border-2 border-slate-700/50 shadow-xl flex flex-col">
-            <div className="flex items-center gap-3 mb-6">
-              <div className="text-3xl">💬</div>
+          <div className="lg:col-span-3 bg-gray-800 rounded-lg p-4 border border-gray-700 flex flex-col">
+            <div className="flex items-center gap-3 mb-4">
+              <div className="text-2xl">💬</div>
               <div className="flex-1">
-                <h2 className="font-bold text-xl text-white">Chat</h2>
+                <h2 className="font-bold text-lg text-white">Chat</h2>
                 <p className="text-sm text-gray-400">Send a message to everyone</p>
               </div>
             </div>
             
-            <div className="flex-1 overflow-y-auto mb-4 space-y-3 min-h-[400px] max-h-[400px] custom-scrollbar pr-2">
+            <div className="flex-1 overflow-y-auto mb-4 space-y-2 min-h-[400px] max-h-[400px] pr-2">
               {messages.map((m, i) => (
-                <div 
-                  key={i} 
-                  className={`animate-slide-in ${m.user === 'system' ? 'text-center' : ''}`}
-                  style={{ animationDelay: `${i * 20}ms` }}
-                >
+                <div key={i} className={m.user === 'system' ? 'text-center' : ''}>
                   {m.user === 'system' ? (
-                    <div className="inline-block px-4 py-2 rounded-full bg-slate-700/30 text-gray-400 text-sm italic">
+                    <div className="inline-block px-3 py-1 rounded-full bg-gray-700 text-gray-400 text-sm">
                       {m.text}
                     </div>
                   ) : (
-                    <div className="flex items-start gap-3 group">
-                      <div className="w-8 h-8 rounded-full bg-gradient-to-br from-cyan-500 to-blue-500 flex items-center justify-center font-bold text-white text-sm flex-shrink-0">
+                    <div className="flex items-start gap-2">
+                      <div className="w-6 h-6 rounded-full bg-blue-600 flex items-center justify-center font-bold text-white text-xs flex-shrink-0">
                         {m.user.charAt(0).toUpperCase()}
                       </div>
-                      <div className="flex-1 bg-gradient-to-br from-slate-700/50 to-slate-800/50 rounded-2xl rounded-tl-none p-4 border border-slate-700/30 group-hover:border-blue-500/30 transition-all">
-                        <div className="font-bold text-blue-400 mb-1 text-sm">{m.user}</div>
+                      <div className="flex-1 bg-gray-700 rounded-lg p-3">
+                        <div className="font-medium text-blue-400 mb-1 text-sm">{m.user}</div>
                         <div className="text-white break-words">{m.text}</div>
                       </div>
                     </div>
@@ -723,19 +691,18 @@ export default function App() {
               ))}
             </div>
 
-            <form onSubmit={handleSend} className="flex gap-3">
+            <form onSubmit={handleSend} className="flex gap-2">
               <input
-                className="flex-1 p-4 rounded-xl bg-slate-900/80 border-2 border-slate-700 focus:outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-500/20 transition-all text-white placeholder-gray-500"
+                className="flex-1 p-3 rounded-lg bg-gray-700 border border-gray-600 focus:outline-none focus:border-blue-500 text-white placeholder-gray-400"
                 placeholder="Say something..."
                 value={message}
                 onChange={e => setMessage(e.target.value)}
               />
               <button 
-                className="bg-gradient-to-r from-blue-600 to-purple-600 hover:from-blue-700 hover:to-purple-700 rounded-xl px-8 py-4 font-bold transition-all duration-300 shadow-lg hover:shadow-blue-500/50 flex items-center gap-2 group" 
+                className="bg-blue-600 hover:bg-blue-700 rounded-lg px-4 py-3 font-medium transition-colors" 
                 type="submit"
               >
-                <span>Send</span>
-                <span className="group-hover:translate-x-1 transition-transform">→</span>
+                Send
               </button>
             </form>
           </div>
@@ -777,26 +744,23 @@ export default function App() {
             </button>
           </div>
           
-          <div className="mt-6">
+          <div className="mt-4">
             <div className="flex items-center justify-between mb-2">
               <span className="text-sm text-gray-400">Volume Level</span>
-              <span className="text-sm font-mono text-blue-400">{Math.round(micLevel)}%</span>
+              <span className="text-sm text-gray-300">{Math.round(micLevel)}%</span>
             </div>
-            <div className="h-4 bg-slate-900/80 rounded-full overflow-hidden border-2 border-slate-700/50">
+            <div className="h-3 bg-gray-700 rounded-full overflow-hidden border border-gray-600">
               <div 
                 className={`h-full transition-all duration-75 rounded-full ${
                   isMuted 
-                    ? 'bg-gradient-to-r from-gray-600 to-gray-700'
+                    ? 'bg-gray-500'
                     : micLevel > 70 
-                      ? 'bg-gradient-to-r from-green-500 via-yellow-500 to-red-500'
+                      ? 'bg-red-500'
                       : micLevel > 30
-                        ? 'bg-gradient-to-r from-green-500 to-yellow-500'
-                        : 'bg-gradient-to-r from-green-600 to-green-500'
-                } shadow-lg`}
-                style={{ 
-                  width: `${isMuted ? 0 : micLevel}%`,
-                  boxShadow: isMuted ? 'none' : '0 0 20px rgba(34, 197, 94, 0.5)'
-                }}
+                        ? 'bg-yellow-500'
+                        : 'bg-green-500'
+                }`}
+                style={{ width: `${isMuted ? 0 : micLevel}%` }}
               />
             </div>
             <div className="flex justify-between mt-1 text-xs text-gray-500">
@@ -806,21 +770,22 @@ export default function App() {
           </div>
         </div>
         
-        {/* Screen Share Display */}
+      
         {screenSharer && (
-          <div className="mt-6 bg-gradient-to-br from-slate-800/80 to-slate-900/80 backdrop-blur-xl rounded-2xl p-6 border-2 border-blue-500/50 shadow-xl animate-scaleIn">
+          <div className="mt-6 bg-gray-800 rounded-lg p-4 border border-gray-700">
             <div className="flex items-center gap-3 mb-4">
-              <div className="text-3xl">🖥️</div>
+              <div className="text-2xl">🖥️</div>
               <div>
-                <h3 className="text-xl font-bold text-white">Screen Share</h3>
-                <p className="text-sm text-blue-400">{screenSharer} is sharing their screen</p>
+                <h3 className="text-lg font-bold text-white">Screen Share</h3>
+                <p className="text-sm text-gray-400">{screenSharer} is sharing their screen</p>
               </div>
             </div>
-            <div className="bg-black rounded-xl overflow-hidden border-2 border-slate-700/50 shadow-2xl">
+            <div className="bg-black rounded-lg overflow-hidden border border-gray-600">
               <video 
                 ref={remoteVideoRef}
                 autoPlay
                 playsInline
+                muted
                 className="w-full h-auto max-h-[600px] object-contain"
               />
             </div>
@@ -828,5 +793,9 @@ export default function App() {
         )}
       </div>
     </div>
-  );
+    </div>
+    );
+  }
+
+  return null;
 }
