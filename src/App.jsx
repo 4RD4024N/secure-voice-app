@@ -94,6 +94,16 @@ export default function App() {
       createPeerConnection(userId, true);
     });
 
+    socket.on('user-left', ({ userId }) => {
+      console.log('User left, closing peer connection:', userId);
+      const pc = peersRef.current[userId];
+      if (pc) {
+        pc.close();
+        delete peersRef.current[userId];
+      }
+      delete remoteStreamsRef.current[userId];
+    });
+
     socket.on('offer', async ({ from, offer }) => {
       console.log('Received offer from:', from);
       const pc = createPeerConnection(from, false);
@@ -105,6 +115,8 @@ export default function App() {
 
     socket.on('answer', async ({ from, answer }) => {
       console.log('Received answer from:', from);
+      const candidateCount = (answer.sdp.match(/a=candidate/g) || []).length;
+      console.log('  answer SDP has', candidateCount, 'embedded candidates');
       const pc = peersRef.current[from];
       if (pc) {
         await pc.setRemoteDescription(new RTCSessionDescription(answer));
@@ -112,9 +124,16 @@ export default function App() {
     });
 
     socket.on('ice-candidate', async ({ from, candidate }) => {
+      console.log('<<< RECV ice-candidate from', from.slice(0, 6), candidate?.candidate?.split(' ').slice(0, 5).join(' '));
       const pc = peersRef.current[from];
       if (pc) {
-        await pc.addIceCandidate(new RTCIceCandidate(candidate));
+        try {
+          await pc.addIceCandidate(new RTCIceCandidate(candidate));
+        } catch (err) {
+          console.error('addIceCandidate error:', err);
+        }
+      } else {
+        console.warn('No peer for ice-candidate from', from.slice(0, 6));
       }
     });
 
@@ -162,11 +181,11 @@ export default function App() {
 
     peersRef.current[userId] = pc;
 
-    // Add local stream (use processed stream if noise cancellation is enabled)
-    const streamToUse = isNoiseCancellationEnabled && processedStreamRef.current 
-      ? processedStreamRef.current 
+    // Add local audio (use processed stream if noise cancellation is enabled)
+    const streamToUse = isNoiseCancellationEnabled && processedStreamRef.current
+      ? processedStreamRef.current
       : streamRef.current;
-    
+
     if (streamToUse) {
       streamToUse.getTracks().forEach(track => {
         pc.addTrack(track, streamToUse);
@@ -175,16 +194,39 @@ export default function App() {
 
     // Handle incoming audio/video
     pc.ontrack = (event) => {
-      console.log('Received remote track from:', userId, 'kind:', event.track.kind);
+      console.log('Received remote track from:', userId, 'kind:', event.track.kind,
+        '| ICE:', pc.iceConnectionState, '| conn:', pc.connectionState,
+        '| track muted:', event.track.muted);
       const [remoteStream] = event.streams;
       remoteStreamsRef.current[userId] = remoteStream;
-      
+
       if (event.track.kind === 'audio') {
-        // Create audio element to play remote stream
         const audio = new Audio();
         audio.srcObject = remoteStream;
         audio.autoplay = true;
-        audio.play().catch(e => console.log('Audio play error:', e));
+        audio.play()
+          .then(() => console.log('Audio playing OK'))
+          .catch(e => console.log('Audio play error:', e.name, e.message));
+        window._debugAudio = audio; // keep reference so it isn't garbage collected
+
+        // Diagnose ICE: what candidates did we actually gather?
+        setTimeout(async () => {
+          const stats = await pc.getStats();
+          let local = 0, srflx = 0, relay = 0, host = 0, pairs = 0, succeeded = 0;
+          stats.forEach(r => {
+            if (r.type === 'local-candidate') {
+              local++;
+              if (r.candidateType === 'srflx') srflx++;
+              if (r.candidateType === 'relay') relay++;
+              if (r.candidateType === 'host') host++;
+            }
+            if (r.type === 'candidate-pair') {
+              pairs++;
+              if (r.state === 'succeeded') succeeded++;
+            }
+          });
+          console.log(`[${userId.slice(0,6)}] ICE stats: local=${local} (host=${host} srflx=${srflx} relay=${relay}), pairs=${pairs}, succeeded=${succeeded}, state=${pc.iceConnectionState}`);
+        }, 5000);
       } else if (event.track.kind === 'video') {
         // Display screen share
         console.log('Received video track (screen share)');
@@ -195,11 +237,23 @@ export default function App() {
       }
     };
 
-    // Handle ICE candidates
     pc.onicecandidate = (event) => {
+      console.log('%c onicecandidate FIRED', 'color:orange', 'candidate?', !!event.candidate, 'socket?', !!socketRef.current);
       if (event.candidate) {
-        socketRef.current.emit('ice-candidate', { to: userId, candidate: event.candidate });
+        console.log('>>> SEND ice-candidate to', userId.slice(0, 6), event.candidate.type, event.candidate.protocol);
+        socketRef.current?.emit('ice-candidate', { to: userId, candidate: event.candidate });
       }
+    };
+
+    pc.onicegatheringstatechange = () => {
+      console.log(`[${userId.slice(0, 6)}] gathering:`, pc.iceGatheringState);
+      if (pc.iceGatheringState === 'complete' && pc.localDescription) {
+        const n = (pc.localDescription.sdp.match(/a=candidate/g) || []).length;
+        console.log(`[${userId.slice(0, 6)}] localDescription now has ${n} candidates after gathering`);
+      }
+    };
+    pc.oniceconnectionstatechange = () => {
+      console.log(`[${userId.slice(0, 6)}] ICE:`, pc.iceConnectionState);
     };
 
     // Create offer if initiator
@@ -389,6 +443,9 @@ export default function App() {
       audioContextRef.current.close();
     }
     
+    // Tell the server we're leaving so it removes us immediately (not just on disconnect)
+    socketRef.current.emit('leave');
+
     setMicLevel(0);
     setScreenSharer(null);
     setView('lobby');
@@ -416,22 +473,22 @@ export default function App() {
       
       screenStreamRef.current = screenStream;
       setIsScreenSharing(true);
-      
+
       // Notify others that screen sharing started
       socketRef.current.emit('screen-share-started', { username });
-      
+
       // Add screen track to all existing peer connections and renegotiate
       for (const [userId, pc] of Object.entries(peersRef.current)) {
         const videoTrack = screenStream.getVideoTracks()[0];
         const sender = pc.getSenders().find(s => s.track?.kind === 'video');
-        
+
         if (sender) {
           await sender.replaceTrack(videoTrack);
         } else {
           pc.addTrack(videoTrack, screenStream);
         }
-        
-        // Renegotiate the connection to ensure video track is properly sent
+
+        // Renegotiate the connection to ensure the video track is properly sent
         try {
           const offer = await pc.createOffer();
           await pc.setLocalDescription(offer);
@@ -440,12 +497,12 @@ export default function App() {
           console.error('Error renegotiating for user', userId, ':', err);
         }
       }
-      
+
       // Handle when user stops sharing via browser UI
       screenStream.getVideoTracks()[0].onended = () => {
         stopScreenShare();
       };
-      
+
     } catch (err) {
       console.error('Error starting screen share:', err);
       alert('Could not start screen sharing. Please allow screen access.');
@@ -457,17 +514,16 @@ export default function App() {
       screenStreamRef.current.getTracks().forEach(track => track.stop());
       screenStreamRef.current = null;
     }
-    
+
     setIsScreenSharing(false);
     socketRef.current.emit('screen-share-stopped');
-    
+
     // Remove video tracks from all peer connections and renegotiate
     Object.entries(peersRef.current).forEach(async ([userId, pc]) => {
       const sender = pc.getSenders().find(s => s.track?.kind === 'video');
       if (sender) {
         try {
           pc.removeTrack(sender);
-          // Renegotiate after removing track
           const offer = await pc.createOffer();
           await pc.setLocalDescription(offer);
           socketRef.current.emit('offer', { to: userId, offer });
@@ -923,17 +979,39 @@ export default function App() {
       
         {screenSharer && (
           <div className="mt-6 bg-gray-800 rounded-lg p-4 border border-gray-700">
-            <div className="flex items-center gap-3 mb-4">
-              <div className="w-6 h-6 bg-gradient-to-r from-blue-600 to-purple-600 rounded flex items-center justify-center">
-                <div className="w-4 h-3 bg-white rounded"></div>
+            <div className="flex items-center justify-between mb-4">
+              <div className="flex items-center gap-3">
+                <div className="w-6 h-6 bg-gradient-to-r from-blue-600 to-purple-600 rounded flex items-center justify-center">
+                  <div className="w-4 h-3 bg-white rounded"></div>
+                </div>
+                <div>
+                  <h3 className="text-lg font-bold text-white">Screen Share</h3>
+                  <p className="text-sm text-gray-400">{screenSharer} is sharing their screen</p>
+                </div>
               </div>
-              <div>
-                <h3 className="text-lg font-bold text-white">Screen Share</h3>
-                <p className="text-sm text-gray-400">{screenSharer} is sharing their screen</p>
-              </div>
+              <button
+                onClick={() => {
+                  const v = remoteVideoRef.current;
+                  if (!v) return;
+                  if (document.fullscreenElement === v) {
+                    document.exitFullscreen();
+                  } else {
+                    v.requestFullscreen().catch(e => console.log('Fullscreen error:', e));
+                  }
+                }}
+                className="bg-gray-700 hover:bg-gray-600 rounded-lg px-3 py-2 text-sm font-medium transition-colors flex items-center gap-2"
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                  <polyline points="15 3 21 3 21 9"></polyline>
+                  <polyline points="9 21 3 21 3 15"></polyline>
+                  <line x1="21" y1="3" x2="14" y2="10"></line>
+                  <line x1="3" y1="21" x2="10" y2="14"></line>
+                </svg>
+                Tam Ekran
+              </button>
             </div>
             <div className="bg-black rounded-lg overflow-hidden border border-gray-600">
-              <video 
+              <video
                 ref={remoteVideoRef}
                 autoPlay
                 playsInline

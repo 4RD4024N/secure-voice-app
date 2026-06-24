@@ -59,7 +59,7 @@ io.on('connection', (socket) => {
     currentRoom = room;
     username = user;
     socket.join(room);
-    
+
     if (!rooms[room]) {
       rooms[room] = {
         users: [],
@@ -67,16 +67,30 @@ io.on('connection', (socket) => {
         createdAt: new Date().toISOString()
       };
     }
-    
-    rooms[room].users.push({ id: socket.id, name: user });
+
+    // Idempotent: only add this socket if it isn't already in the room.
+    // Guards against duplicate "join" emits (e.g. React StrictMode / re-renders).
+    if (!rooms[room].users.some(u => u.id === socket.id)) {
+      rooms[room].users.push({ id: socket.id, name: user });
+    }
     console.log('User joined room. currentRoom:', currentRoom, 'username:', username);
     io.to(room).emit('users', rooms[room].users);
     socket.to(room).emit('message', { user: 'system', text: `${user} joined!` });
-    
+
     // Notify other users to initiate WebRTC connections
     socket.to(room).emit('user-joined', { userId: socket.id });
-    
+
+    // If someone is already sharing screen, notify the new joiner
+    if (rooms[room].screenSharer) {
+      socket.emit('screen-share-started', rooms[room].screenSharer);
+    }
+
     io.emit('room-updated', { roomName: room, userCount: rooms[room].users.length });
+  });
+
+  // Explicit leave (client calls this when the user clicks "Leave Room")
+  socket.on('leave', () => {
+    cleanupRoom();
   });
 
   socket.on('message', (msg) => {
@@ -100,6 +114,7 @@ io.on('connection', (socket) => {
   });
 
   socket.on('ice-candidate', ({ to, candidate }) => {
+    console.log(`ICE relay: ${socket.id.slice(0,6)} -> ${to?.slice(0,6)}`);
     io.to(to).emit('ice-candidate', { from: socket.id, candidate });
   });
 
@@ -107,31 +122,51 @@ io.on('connection', (socket) => {
   socket.on('screen-share-started', ({ username: sharerName }) => {
     console.log('Screen share started by:', sharerName, 'in room:', currentRoom);
     if (currentRoom) {
-      socket.to(currentRoom).emit('screen-share-started', { userId: socket.id, username: sharerName });
+      const payload = { userId: socket.id, username: sharerName };
+      rooms[currentRoom].screenSharer = payload;
+      socket.to(currentRoom).emit('screen-share-started', payload);
     }
   });
 
   socket.on('screen-share-stopped', () => {
     console.log('Screen share stopped by:', username, 'in room:', currentRoom);
     if (currentRoom) {
+      rooms[currentRoom].screenSharer = null;
       io.to(currentRoom).emit('screen-share-stopped', { userId: socket.id });
     }
   });
 
-  socket.on('disconnect', () => {
-    if (currentRoom && rooms[currentRoom]) {
-      rooms[currentRoom].users = rooms[currentRoom].users.filter(u => u.id !== socket.id);
-      io.to(currentRoom).emit('users', rooms[currentRoom].users);
-      socket.to(currentRoom).emit('message', { user: 'system', text: `${username} left!` });
-      
-      // Delete empty rooms that aren't owned by anyone
-      if (rooms[currentRoom].users.length === 0) {
-        delete rooms[currentRoom];
-        io.emit('room-removed', { roomName: currentRoom });
-      } else {
-        io.emit('room-updated', { roomName: currentRoom, userCount: rooms[currentRoom].users.length });
-      }
+  function cleanupRoom() {
+    if (!currentRoom || !rooms[currentRoom]) return;
+    const room = currentRoom;
+
+    rooms[room].users = rooms[room].users.filter(u => u.id !== socket.id);
+    socket.leave(room);
+
+    // Tell remaining peers to tear down the WebRTC connection to this socket
+    socket.to(room).emit('user-left', { userId: socket.id });
+    io.to(room).emit('users', rooms[room].users);
+    socket.to(room).emit('message', { user: 'system', text: `${username} left!` });
+
+    // If the leaver was the screen sharer, clear it
+    if (rooms[room].screenSharer && rooms[room].screenSharer.userId === socket.id) {
+      rooms[room].screenSharer = null;
+      socket.to(room).emit('screen-share-stopped', { userId: socket.id });
     }
+
+    // Delete empty rooms
+    if (rooms[room].users.length === 0) {
+      delete rooms[room];
+      io.emit('room-removed', { roomName: room });
+    } else {
+      io.emit('room-updated', { roomName: room, userCount: rooms[room].users.length });
+    }
+
+    currentRoom = null;
+  }
+
+  socket.on('disconnect', () => {
+    cleanupRoom();
   });
 });
 
