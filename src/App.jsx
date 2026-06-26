@@ -5,107 +5,130 @@ const SOCKET_URL = window.location.origin;
 
 export default function App() {
   const savedUsername = localStorage.getItem('voiceapp_username') || '';
-  const [view, setView] = useState('username');
-  const [username, setUsername] = useState(savedUsername);
+  const [view, setView]           = useState(savedUsername ? 'lobby' : 'username');
+  const [username, setUsername]   = useState(savedUsername);
   const [currentRoom, setCurrentRoom] = useState(null);
-  const [rooms, setRooms] = useState([]);
-  const [users, setUsers] = useState([]);
-  const [messages, setMessages] = useState([]);
-  const [message, setMessage] = useState('');
-  const [isMuted, setIsMuted] = useState(false);
+  const [rooms, setRooms]         = useState([]);
+  const [users, setUsers]         = useState([]);
+  const [messages, setMessages]   = useState([]);
+  const [message, setMessage]     = useState('');
+  const [isMuted, setIsMuted]     = useState(false);
   const [connected, setConnected] = useState(false);
   const [showCreateRoom, setShowCreateRoom] = useState(false);
   const [newRoomName, setNewRoomName] = useState('');
-  const [micLevel, setMicLevel] = useState(0);
-  const [isScreenSharing, setIsScreenSharing] = useState(false);
-  const [screenSharer, setScreenSharer] = useState(null);
+  const [micLevel, setMicLevel]   = useState(0);
+  const [isScreenSharing, setIsScreenSharing]     = useState(false);
+  const [screenSharer, setScreenSharer]           = useState(null);
   const [isNoiseCancellationEnabled, setIsNoiseCancellationEnabled] = useState(true);
   const [noiseReductionLevel, setNoiseReductionLevel] = useState(0.8);
-  
-  const socketRef = useRef();
-  const streamRef = useRef();
-  const processedStreamRef = useRef();
-  const screenStreamRef = useRef();
-  const audioContextRef = useRef();
-  const analyserRef = useRef();
-  const animationFrameRef = useRef();
-  const peersRef = useRef({});
-  const remoteStreamsRef = useRef({});
-  const remoteVideoRef = useRef();
-  const gainNodeRef = useRef();
-  const noiseGateRef = useRef();
-  const processorRef = useRef();
+  const [socketId, setSocketId]   = useState(null);
 
+  const socketRef           = useRef();
+  const streamRef           = useRef();
+  const processedStreamRef  = useRef();
+  const screenStreamRef     = useRef();
+  const audioContextRef     = useRef();
+  const analyserRef         = useRef();
+  const animationFrameRef   = useRef();
+  const peersRef            = useRef({});
+  const remoteStreamsRef    = useRef({});
+  const remoteVideoRef      = useRef();
+  const gainNodeRef         = useRef();
+  const processorRef        = useRef();
+  const viewRef             = useRef(view);
+  const joinRoomRef         = useRef(null);
+  const leaveRoomRef        = useRef(null);
+  useEffect(() => { viewRef.current = view; }, [view]);
+
+  // ── Socket + WebRTC setup ──────────────────────────────────────────────────
   useEffect(() => {
     const socket = io(SOCKET_URL);
     socketRef.current = socket;
 
     socket.on('connect', () => {
-      console.log('Connected to server');
       setConnected(true);
-      if (view === 'lobby') {
-        socket.emit('get-rooms');
-      }
+      setSocketId(socket.id);
+      if (viewRef.current === 'lobby') socket.emit('get-rooms');
     });
 
-    socket.on('rooms-list', (roomList) => {
-      setRooms(roomList);
-    });
-
-    socket.on('room-created', () => {
-      socketRef.current.emit('get-rooms');
-    });
+    socket.on('rooms-list',    (list) => setRooms(list));
+    socket.on('room-created',  ()     => socketRef.current.emit('get-rooms'));
+    socket.on('room-removed',  ()     => socketRef.current?.emit('get-rooms'));
+    socket.on('room-updated',  ()     => socketRef.current?.emit('get-rooms'));
 
     socket.on('room-created-success', ({ roomName }) => {
       setNewRoomName('');
       setShowCreateRoom(false);
-      joinRoom(roomName);
-    });
-
-    socket.on('room-removed', () => {
-      if (socketRef.current) {
-        socketRef.current.emit('get-rooms');
-      }
-    });
-
-    socket.on('room-updated', () => {
-      if (socketRef.current) {
-        socketRef.current.emit('get-rooms');
-      }
+      joinRoomRef.current(roomName);
     });
 
     socket.on('room-deleted', () => {
-      alert('This room has been deleted by the creator');
-      leaveRoom();
+      alert('This room has been deleted by the creator.');
+      leaveRoomRef.current();
     });
 
-    socket.on('users', (userList) => {
-      console.log('Users updated:', userList);
-      setUsers(userList);
-    });
+    socket.on('users',   (list) => setUsers(list));
+    socket.on('message', (msg)  => setMessages(prev => [...prev, msg]));
 
-    socket.on('message', (msg) => {
-      console.log('Message received:', msg);
-      setMessages((msgs) => [...msgs, msg]);
-    });
+    function createPeerConnection(userId, isInitiator) {
+      if (peersRef.current[userId]) return peersRef.current[userId];
 
-    socket.on('user-joined', ({ userId }) => {
-      console.log('User joined, creating offer for:', userId);
-      createPeerConnection(userId, true);
-    });
+      const pc = new RTCPeerConnection({
+        iceServers: [
+          { urls: 'stun:stun.l.google.com:19302' },
+          { urls: 'stun:stun1.l.google.com:19302' },
+        ],
+      });
+
+      peersRef.current[userId] = pc;
+
+      const streamToUse = processedStreamRef.current || streamRef.current;
+      if (streamToUse) streamToUse.getTracks().forEach(t => pc.addTrack(t, streamToUse));
+
+      pc.ontrack = (event) => {
+        const [remoteStream] = event.streams;
+        remoteStreamsRef.current[userId] = remoteStream;
+        if (event.track.kind === 'audio') {
+          const audio = new Audio();
+          audio.srcObject = remoteStream;
+          audio.autoplay  = true;
+          audio.play().catch(() => {});
+          window._debugAudio = audio;
+        } else if (event.track.kind === 'video') {
+          if (remoteVideoRef.current) {
+            remoteVideoRef.current.srcObject = remoteStream;
+            remoteVideoRef.current.play().catch(() => {});
+          }
+        }
+      };
+
+      pc.onicecandidate = (event) => {
+        if (event.candidate)
+          socketRef.current?.emit('ice-candidate', { to: userId, candidate: event.candidate });
+      };
+
+      pc.oniceconnectionstatechange = () =>
+        console.log(`[${userId.slice(0,6)}] ICE:`, pc.iceConnectionState);
+
+      if (isInitiator) {
+        pc.createOffer().then(offer => {
+          pc.setLocalDescription(offer);
+          socketRef.current.emit('offer', { to: userId, offer });
+        });
+      }
+
+      return pc;
+    }
+
+    socket.on('user-joined', ({ userId }) => createPeerConnection(userId, true));
 
     socket.on('user-left', ({ userId }) => {
-      console.log('User left, closing peer connection:', userId);
       const pc = peersRef.current[userId];
-      if (pc) {
-        pc.close();
-        delete peersRef.current[userId];
-      }
+      if (pc) { pc.close(); delete peersRef.current[userId]; }
       delete remoteStreamsRef.current[userId];
     });
 
     socket.on('offer', async ({ from, offer }) => {
-      console.log('Received offer from:', from);
       const pc = createPeerConnection(from, false);
       await pc.setRemoteDescription(new RTCSessionDescription(offer));
       const answer = await pc.createAnswer();
@@ -114,187 +137,90 @@ export default function App() {
     });
 
     socket.on('answer', async ({ from, answer }) => {
-      console.log('Received answer from:', from);
-      const candidateCount = (answer.sdp.match(/a=candidate/g) || []).length;
-      console.log('  answer SDP has', candidateCount, 'embedded candidates');
       const pc = peersRef.current[from];
-      if (pc) {
-        await pc.setRemoteDescription(new RTCSessionDescription(answer));
-      }
+      if (pc) await pc.setRemoteDescription(new RTCSessionDescription(answer));
     });
 
     socket.on('ice-candidate', async ({ from, candidate }) => {
-      console.log('<<< RECV ice-candidate from', from.slice(0, 6), candidate?.candidate?.split(' ').slice(0, 5).join(' '));
       const pc = peersRef.current[from];
       if (pc) {
-        try {
-          await pc.addIceCandidate(new RTCIceCandidate(candidate));
-        } catch (err) {
-          console.error('addIceCandidate error:', err);
-        }
-      } else {
-        console.warn('No peer for ice-candidate from', from.slice(0, 6));
+        try { await pc.addIceCandidate(new RTCIceCandidate(candidate)); }
+        catch (e) { console.error('addIceCandidate:', e); }
       }
     });
 
-    socket.on('screen-share-started', ({ userId, username: sharerName }) => {
-      console.log('Screen sharing started by:', sharerName);
-      setScreenSharer(sharerName);
-    });
-
+    socket.on('screen-share-started', ({ username: name }) => setScreenSharer(name));
     socket.on('screen-share-stopped', () => {
-      console.log('Screen sharing stopped');
       setScreenSharer(null);
-      if (remoteVideoRef.current) {
-        remoteVideoRef.current.srcObject = null;
-      }
+      if (remoteVideoRef.current) remoteVideoRef.current.srcObject = null;
     });
 
-    socket.on('error', ({ message }) => {
-      alert(message);
-    });
+    socket.on('error', ({ message: msg }) => alert(msg));
 
-    return () => {
-      socket.disconnect();
-    };
+    return () => socket.disconnect();
   }, []);
 
   useEffect(() => {
-    if (streamRef.current) {
-      streamRef.current.getAudioTracks().forEach(track => {
-        track.enabled = !isMuted;
-      });
-    }
+    if (streamRef.current)
+      streamRef.current.getAudioTracks().forEach(t => { t.enabled = !isMuted; });
   }, [isMuted]);
 
-  function createPeerConnection(userId, isInitiator) {
-    if (peersRef.current[userId]) {
-      return peersRef.current[userId];
-    }
-
-    const pc = new RTCPeerConnection({
-      iceServers: [
-        { urls: 'stun:stun.l.google.com:19302' },
-        { urls: 'stun:stun1.l.google.com:19302' }
-      ]
-    });
-
-    peersRef.current[userId] = pc;
-
-    // Add local audio (use processed stream if noise cancellation is enabled)
-    const streamToUse = isNoiseCancellationEnabled && processedStreamRef.current
-      ? processedStreamRef.current
-      : streamRef.current;
-
-    if (streamToUse) {
-      streamToUse.getTracks().forEach(track => {
-        pc.addTrack(track, streamToUse);
-      });
-    }
-
-    // Handle incoming audio/video
-    pc.ontrack = (event) => {
-      console.log('Received remote track from:', userId, 'kind:', event.track.kind,
-        '| ICE:', pc.iceConnectionState, '| conn:', pc.connectionState,
-        '| track muted:', event.track.muted);
-      const [remoteStream] = event.streams;
-      remoteStreamsRef.current[userId] = remoteStream;
-
-      if (event.track.kind === 'audio') {
-        const audio = new Audio();
-        audio.srcObject = remoteStream;
-        audio.autoplay = true;
-        audio.play()
-          .then(() => console.log('Audio playing OK'))
-          .catch(e => console.log('Audio play error:', e.name, e.message));
-        window._debugAudio = audio; // keep reference so it isn't garbage collected
-
-        // Diagnose ICE: what candidates did we actually gather?
-        setTimeout(async () => {
-          const stats = await pc.getStats();
-          let local = 0, srflx = 0, relay = 0, host = 0, pairs = 0, succeeded = 0;
-          stats.forEach(r => {
-            if (r.type === 'local-candidate') {
-              local++;
-              if (r.candidateType === 'srflx') srflx++;
-              if (r.candidateType === 'relay') relay++;
-              if (r.candidateType === 'host') host++;
-            }
-            if (r.type === 'candidate-pair') {
-              pairs++;
-              if (r.state === 'succeeded') succeeded++;
-            }
-          });
-          console.log(`[${userId.slice(0,6)}] ICE stats: local=${local} (host=${host} srflx=${srflx} relay=${relay}), pairs=${pairs}, succeeded=${succeeded}, state=${pc.iceConnectionState}`);
-        }, 5000);
-      } else if (event.track.kind === 'video') {
-        // Display screen share
-        console.log('Received video track (screen share)');
-        if (remoteVideoRef.current) {
-          remoteVideoRef.current.srcObject = remoteStream;
-          remoteVideoRef.current.play().catch(e => console.log('Video play error:', e));
-        }
-      }
-    };
-
-    pc.onicecandidate = (event) => {
-      console.log('%c onicecandidate FIRED', 'color:orange', 'candidate?', !!event.candidate, 'socket?', !!socketRef.current);
-      if (event.candidate) {
-        console.log('>>> SEND ice-candidate to', userId.slice(0, 6), event.candidate.type, event.candidate.protocol);
-        socketRef.current?.emit('ice-candidate', { to: userId, candidate: event.candidate });
-      }
-    };
-
-    pc.onicegatheringstatechange = () => {
-      console.log(`[${userId.slice(0, 6)}] gathering:`, pc.iceGatheringState);
-      if (pc.iceGatheringState === 'complete' && pc.localDescription) {
-        const n = (pc.localDescription.sdp.match(/a=candidate/g) || []).length;
-        console.log(`[${userId.slice(0, 6)}] localDescription now has ${n} candidates after gathering`);
-      }
-    };
-    pc.oniceconnectionstatechange = () => {
-      console.log(`[${userId.slice(0, 6)}] ICE:`, pc.iceConnectionState);
-    };
-
-    // Create offer if initiator
-    if (isInitiator) {
-      pc.createOffer().then(offer => {
-        pc.setLocalDescription(offer);
-        socketRef.current.emit('offer', { to: userId, offer });
-      });
-    }
-
-    return pc;
-  }
-
+  // ── Room actions ──────────────────────────────────────────────────────────
   const handleSetUsername = (e) => {
     e.preventDefault();
-    if (username.trim()) {
-      localStorage.setItem('voiceapp_username', username.trim());
-      setView('lobby');
-      socketRef.current.emit('get-rooms');
-    }
+    if (!username.trim()) return;
+    localStorage.setItem('voiceapp_username', username.trim());
+    setView('lobby');
+    socketRef.current.emit('get-rooms');
   };
 
   const createRoom = () => {
-    if (newRoomName.trim()) {
+    if (newRoomName.trim())
       socketRef.current.emit('create-room', { roomName: newRoomName.trim(), user: username });
-    }
   };
 
   const deleteRoom = (roomName) => {
-    if (confirm(`Are you sure you want to delete room "${roomName}"?`)) {
+    if (confirm(`Delete room "${roomName}"?`))
       socketRef.current.emit('delete-room', { roomName, user: username });
-    }
+  };
+
+  const buildFallbackGate = (audioContext) => {
+    const sp = audioContext.createScriptProcessor(2048, 1, 1);
+    const sr = audioContext.sampleRate;
+    let gateGain    = 0;
+    let holdSamples = 0;
+    let noisePower  = 1e-6;
+    const HOLD      = 0.25 * sr;
+    const ATK       = 1 - Math.exp(-1 / (sr * 0.005));
+    const REL       = 1 - Math.exp(-1 / (sr * 0.08));
+    const N_ATK     = 1 - Math.exp(-1 / (sr * 2.0));
+    const N_REL     = 1 - Math.exp(-1 / (sr * 0.5));
+    sp.onaudioprocess = (ev) => {
+      const inp = ev.inputBuffer.getChannelData(0);
+      const out = ev.outputBuffer.getChannelData(0);
+      let sumSq = 0;
+      for (let i = 0; i < inp.length; i++) sumSq += inp[i] * inp[i];
+      const rms = Math.sqrt(sumSq / inp.length);
+      if (gateGain < 0.1) noisePower += N_ATK * (rms * rms - noisePower);
+      else noisePower += N_REL * (Math.min(rms * rms * 0.05, noisePower) - noisePower);
+      const snr = 20 * Math.log10((rms + 1e-10) / (Math.sqrt(Math.max(noisePower, 1e-10)) + 1e-10));
+      let target;
+      if (snr > 8) { holdSamples = HOLD; target = 1; }
+      else if (holdSamples > 0) { holdSamples -= inp.length; target = 1; }
+      else target = snr < 4 ? 0 : gateGain;
+      for (let i = 0; i < inp.length; i++) {
+        gateGain += (target > gateGain ? ATK : REL) * (target - gateGain);
+        out[i] = inp[i] * gateGain;
+      }
+    };
+    return sp;
   };
 
   const joinRoom = (roomName) => {
     setCurrentRoom(roomName);
     setMessages([]);
     setUsers([]);
-    
-    console.log('Joining room:', roomName, 'as user:', username);
-    
+
     navigator.mediaDevices.getUserMedia({
       audio: {
         echoCancellation: true,
@@ -302,150 +228,113 @@ export default function App() {
         autoGainControl: true,
         channelCount: 1,
         sampleRate: 48000,
-        sampleSize: 16
+        sampleSize: 16,
       },
-      video: false
+      video: false,
     })
-      .then(stream => {
-        console.log('Got user media with noise cancellation:', isNoiseCancellationEnabled);
+      .then(async stream => {
         streamRef.current = stream;
-        
-        // Setup audio analysis and processing for volume meter and noise reduction
-        const audioContext = new (window.AudioContext || window.webkitAudioContext)();
-        
-        // Resume AudioContext (required by browsers for user-initiated audio)
-        if (audioContext.state === 'suspended') {
-          audioContext.resume().then(() => {
-            console.log('AudioContext resumed, state:', audioContext.state);
-          });
-        }
-        
-        const analyser = audioContext.createAnalyser();
-        const source = audioContext.createMediaStreamSource(stream);
-        
-        // Create audio processing chain for noise reduction
-        const gainNode = audioContext.createGain();
-        const dynamicsCompressor = audioContext.createDynamicsCompressor();
-        const destination = audioContext.createMediaStreamDestination();
-        
-        // Configure compressor for noise reduction
-        dynamicsCompressor.threshold.setValueAtTime(-24, audioContext.currentTime);
-        dynamicsCompressor.knee.setValueAtTime(30, audioContext.currentTime);
-        dynamicsCompressor.ratio.setValueAtTime(12, audioContext.currentTime);
-        dynamicsCompressor.attack.setValueAtTime(0.003, audioContext.currentTime);
-        dynamicsCompressor.release.setValueAtTime(0.25, audioContext.currentTime);
-        
-        // Create noise gate effect
-        if (isNoiseCancellationEnabled) {
-          const scriptProcessor = audioContext.createScriptProcessor(4096, 1, 1);
-          let noiseFloor = -50; // dB
-          
-          scriptProcessor.onaudioprocess = function(event) {
-            const inputBuffer = event.inputBuffer;
-            const outputBuffer = event.outputBuffer;
-            const inputData = inputBuffer.getChannelData(0);
-            const outputData = outputBuffer.getChannelData(0);
-            
-            for (let i = 0; i < inputBuffer.length; i++) {
-              const sample = inputData[i];
-              const amplitude = Math.abs(sample);
-              const db = 20 * Math.log10(amplitude + 1e-10);
-              
-              // Apply noise gate
-              if (db > noiseFloor) {
-                outputData[i] = sample * noiseReductionLevel;
-              } else {
-                outputData[i] = sample * 0.1; // Heavily attenuate noise
-              }
-            }
-          };
-          
-          processorRef.current = scriptProcessor;
-          
-          // Connect processing chain
-          source.connect(gainNode);
-          gainNode.connect(scriptProcessor);
-          scriptProcessor.connect(dynamicsCompressor);
-          dynamicsCompressor.connect(destination);
-          dynamicsCompressor.connect(analyser);
-        } else {
-          // Direct connection without noise processing
-          source.connect(gainNode);
-          gainNode.connect(dynamicsCompressor);
-          dynamicsCompressor.connect(destination);
-          dynamicsCompressor.connect(analyser);
-        }
-        
-        analyser.fftSize = 256;
-        
-        // Store references
-        audioContextRef.current = audioContext;
-        analyserRef.current = analyser;
-        gainNodeRef.current = gainNode;
-        processedStreamRef.current = destination.stream;
-        
-        // Start monitoring microphone level
-        const dataArray = new Uint8Array(analyser.frequencyBinCount);
-        const updateLevel = () => {
-          analyser.getByteFrequencyData(dataArray);
-          const average = dataArray.reduce((a, b) => a + b) / dataArray.length;
-          const normalizedLevel = Math.min(100, (average / 128) * 100);
-          setMicLevel(normalizedLevel);
-          animationFrameRef.current = requestAnimationFrame(updateLevel);
-        };
-        updateLevel();
 
-        // Join the room via socket - WebRTC connections will be created automatically
+        const audioContext = new (window.AudioContext || window.webkitAudioContext)({
+          sampleRate: 48000,
+        });
+        if (audioContext.state === 'suspended') await audioContext.resume();
+
+        const analyser   = audioContext.createAnalyser();
+        const source     = audioContext.createMediaStreamSource(stream);
+        const gainNode   = audioContext.createGain();
+        const dest       = audioContext.createMediaStreamDestination();
+
+        analyser.fftSize = 256;
+        audioContextRef.current    = audioContext;
+        analyserRef.current        = analyser;
+        gainNodeRef.current        = gainNode;
+
+        const connectChain = (middleNode) => {
+          source.connect(gainNode);
+          gainNode.connect(middleNode);
+          middleNode.connect(analyser);
+          middleNode.connect(dest);
+        };
+
+        if (isNoiseCancellationEnabled) {
+          try {
+            await audioContext.audioWorklet.addModule('/rnnoise-processor.js');
+            const rnnoiseNode = new AudioWorkletNode(audioContext, 'rnnoise-processor', {
+              numberOfInputs: 1,
+              numberOfOutputs: 1,
+              outputChannelCount: [1],
+            });
+            processorRef.current = rnnoiseNode;
+            connectChain(rnnoiseNode);
+          } catch (err) {
+            // AudioWorklet not available — fall back to RMS noise gate
+            console.warn('[RNNoise] AudioWorklet failed, using fallback gate:', err);
+            const sp = buildFallbackGate(audioContext);
+            processorRef.current = sp;
+            connectChain(sp);
+          }
+        } else {
+          source.connect(gainNode);
+          gainNode.connect(analyser);
+          gainNode.connect(dest);
+        }
+
+        processedStreamRef.current = dest.stream;
+
+        const data = new Uint8Array(analyser.frequencyBinCount);
+        const tick = () => {
+          analyser.getByteFrequencyData(data);
+          setMicLevel(Math.min(100, (data.reduce((a,b)=>a+b)/data.length/128)*100));
+          animationFrameRef.current = requestAnimationFrame(tick);
+        };
+        tick();
+
         socketRef.current.emit('join', { room: roomName, user: username });
         setView('room');
       })
-      .catch(err => {
-        console.error('Error accessing microphone:', err);
-        alert('Could not access microphone. Please allow microphone access.');
-      });
+      .catch(() => alert('Could not access microphone.'));
+  };
+
+  const stopScreenShare = () => {
+    screenStreamRef.current?.getTracks().forEach(t => t.stop());
+    screenStreamRef.current = null;
+    setIsScreenSharing(false);
+    socketRef.current.emit('screen-share-stopped');
+
+    Object.entries(peersRef.current).forEach(async ([userId, pc]) => {
+      const sender = pc.getSenders().find(s => s.track?.kind === 'video');
+      if (sender) {
+        try {
+          pc.removeTrack(sender);
+          const offer = await pc.createOffer();
+          await pc.setLocalDescription(offer);
+          socketRef.current.emit('offer', { to: userId, offer });
+        } catch (err) { console.error('Renegotiation error:', err); }
+      }
+    });
   };
 
   const leaveRoom = () => {
-    // Stop screen sharing if active
-    if (isScreenSharing) {
-      stopScreenShare();
-    }
-    
-    // Cleanup peer connections
-    Object.values(peersRef.current).forEach(pc => {
-      pc.close();
-    });
-    peersRef.current = {};
-    remoteStreamsRef.current = {};
-    
-    if (streamRef.current) {
-      streamRef.current.getTracks().forEach(track => track.stop());
-      streamRef.current = null;
-    }
-    
-    // Cleanup audio analysis and processing
-    if (animationFrameRef.current) {
-      cancelAnimationFrame(animationFrameRef.current);
-    }
-    if (processorRef.current) {
-      processorRef.current.disconnect();
-      processorRef.current = null;
-    }
-    if (gainNodeRef.current) {
-      gainNodeRef.current.disconnect();
-      gainNodeRef.current = null;
-    }
-    if (processedStreamRef.current) {
-      processedStreamRef.current.getTracks().forEach(track => track.stop());
-      processedStreamRef.current = null;
-    }
-    if (audioContextRef.current) {
-      audioContextRef.current.close();
-    }
-    
-    // Tell the server we're leaving so it removes us immediately (not just on disconnect)
-    socketRef.current.emit('leave');
+    if (isScreenSharing) stopScreenShare();
 
+    Object.values(peersRef.current).forEach(pc => pc.close());
+    peersRef.current      = {};
+    remoteStreamsRef.current = {};
+
+    streamRef.current?.getTracks().forEach(t => t.stop());
+    streamRef.current = null;
+
+    if (animationFrameRef.current) cancelAnimationFrame(animationFrameRef.current);
+    processorRef.current?.disconnect();
+    processorRef.current = null;
+    gainNodeRef.current?.disconnect();
+    gainNodeRef.current = null;
+    processedStreamRef.current?.getTracks().forEach(t => t.stop());
+    processedStreamRef.current = null;
+    audioContextRef.current?.close();
+
+    socketRef.current.emit('leave');
     setMicLevel(0);
     setScreenSharer(null);
     setView('lobby');
@@ -455,131 +344,89 @@ export default function App() {
     socketRef.current.emit('get-rooms');
   };
 
+  useEffect(() => { joinRoomRef.current  = joinRoom; });
+  useEffect(() => { leaveRoomRef.current = leaveRoom; });
+
+  const startScreenShare = async () => {
+    try {
+      const screenStream = await navigator.mediaDevices.getDisplayMedia({ video: { cursor: 'always' }, audio: false });
+      screenStreamRef.current = screenStream;
+      setIsScreenSharing(true);
+      socketRef.current.emit('screen-share-started', { username });
+
+      for (const [userId, pc] of Object.entries(peersRef.current)) {
+        const videoTrack = screenStream.getVideoTracks()[0];
+        const sender = pc.getSenders().find(s => s.track?.kind === 'video');
+        if (sender) await sender.replaceTrack(videoTrack);
+        else pc.addTrack(videoTrack, screenStream);
+        try {
+          const offer = await pc.createOffer();
+          await pc.setLocalDescription(offer);
+          socketRef.current.emit('offer', { to: userId, offer });
+        } catch (err) { console.error('Renegotiation error:', err); }
+      }
+
+      screenStream.getVideoTracks()[0].onended = () => stopScreenShare();
+    } catch (err) {
+      if (err.name !== 'NotAllowedError') alert('Could not start screen sharing.');
+    }
+  };
+
   const handleSend = (e) => {
     e.preventDefault();
-    console.log('Sending message:', message, 'username:', username, 'currentRoom:', currentRoom);
     if (message && socketRef.current) {
       socketRef.current.emit('message', message);
       setMessage('');
     }
   };
 
-  const startScreenShare = async () => {
-    try {
-      const screenStream = await navigator.mediaDevices.getDisplayMedia({ 
-        video: { cursor: 'always' }, 
-        audio: false 
-      });
-      
-      screenStreamRef.current = screenStream;
-      setIsScreenSharing(true);
-
-      // Notify others that screen sharing started
-      socketRef.current.emit('screen-share-started', { username });
-
-      // Add screen track to all existing peer connections and renegotiate
-      for (const [userId, pc] of Object.entries(peersRef.current)) {
-        const videoTrack = screenStream.getVideoTracks()[0];
-        const sender = pc.getSenders().find(s => s.track?.kind === 'video');
-
-        if (sender) {
-          await sender.replaceTrack(videoTrack);
-        } else {
-          pc.addTrack(videoTrack, screenStream);
-        }
-
-        // Renegotiate the connection to ensure the video track is properly sent
-        try {
-          const offer = await pc.createOffer();
-          await pc.setLocalDescription(offer);
-          socketRef.current.emit('offer', { to: userId, offer });
-        } catch (err) {
-          console.error('Error renegotiating for user', userId, ':', err);
-        }
-      }
-
-      // Handle when user stops sharing via browser UI
-      screenStream.getVideoTracks()[0].onended = () => {
-        stopScreenShare();
-      };
-
-    } catch (err) {
-      console.error('Error starting screen share:', err);
-      alert('Could not start screen sharing. Please allow screen access.');
-    }
-  };
-
-  const stopScreenShare = () => {
-    if (screenStreamRef.current) {
-      screenStreamRef.current.getTracks().forEach(track => track.stop());
-      screenStreamRef.current = null;
-    }
-
-    setIsScreenSharing(false);
-    socketRef.current.emit('screen-share-stopped');
-
-    // Remove video tracks from all peer connections and renegotiate
-    Object.entries(peersRef.current).forEach(async ([userId, pc]) => {
-      const sender = pc.getSenders().find(s => s.track?.kind === 'video');
-      if (sender) {
-        try {
-          pc.removeTrack(sender);
-          const offer = await pc.createOffer();
-          await pc.setLocalDescription(offer);
-          socketRef.current.emit('offer', { to: userId, offer });
-        } catch (err) {
-          console.error('Error renegotiating after removing video track for user', userId, ':', err);
-        }
-      }
-    });
-  };
-
   const handleLogout = () => {
-    if (currentRoom) {
-      leaveRoom();
-    }
+    if (currentRoom) leaveRoom();
     localStorage.removeItem('voiceapp_username');
     setUsername('');
     setView('username');
   };
 
+  // ── Views ──────────────────────────────────────────────────────────────────
+
   if (view === 'username') {
     return (
-      <div className="min-h-screen bg-gray-900 text-white flex flex-col items-center justify-center p-4">
-        <div className="text-center mb-12">
-          <div className="mb-6">
-            <div className="w-16 h-16 mx-auto bg-gradient-to-r from-blue-600 to-purple-600 rounded-full flex items-center justify-center mb-4">
-              <div className="text-white font-bold text-xl">V</div>
+      <div className="min-h-screen bg-[#0f0f0f] text-white flex items-center justify-center p-6">
+        <div className="w-full max-w-xs anim-fade-up">
+          <div className="mb-10">
+            <div className="flex items-center gap-3 mb-2">
+              <div className="w-8 h-8 rounded-lg bg-white/10 flex items-center justify-center">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
+                  <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+                  <line x1="12" y1="19" x2="12" y2="23"/>
+                  <line x1="8" y1="23" x2="16" y2="23"/>
+                </svg>
+              </div>
+              <span className="text-lg font-semibold tracking-tight">VoiceHub</span>
             </div>
+            <p className="text-sm text-white/40 ml-11">Voice rooms, no account needed.</p>
           </div>
-          <h1 className="text-4xl font-bold mb-4 text-white">
-            VoiceHub
-          </h1>
-          <p className="text-lg text-gray-300">Connect with friends instantly</p>
-        </div>
 
-        <form onSubmit={handleSetUsername} className="w-full max-w-md">
-          <div className="bg-gray-800 p-8 rounded-lg shadow-lg border border-gray-700">
-            <label className="block text-sm font-medium text-gray-300 mb-3">What should we call you?</label>
-            <input
-              className="w-full p-3 rounded-lg bg-gray-700 border border-gray-600 focus:outline-none focus:border-blue-500 text-white placeholder-gray-400"
-              placeholder="Enter your name"
-              value={username}
-              onChange={e => setUsername(e.target.value)}
-              required
-              autoFocus
-            />
-            <button 
-              className="w-full mt-4 bg-blue-600 hover:bg-blue-700 rounded-lg p-3 font-medium transition-colors" 
+          <form onSubmit={handleSetUsername} className="space-y-3">
+            <div>
+              <label className="block text-xs text-white/40 mb-1.5 uppercase tracking-wider">Your name</label>
+              <input
+                className="w-full bg-white/5 border border-white/10 rounded-lg px-3.5 py-2.5 text-sm text-white placeholder-white/20 focus:outline-none focus:border-white/30 transition-colors"
+                placeholder="e.g. Alex"
+                value={username}
+                onChange={e => setUsername(e.target.value)}
+                required
+                autoFocus
+              />
+            </div>
+            <button
               type="submit"
+              className="w-full bg-white text-black rounded-lg py-2.5 text-sm font-semibold hover:bg-white/90 active:scale-[0.98] transition-all"
             >
-              Enter VoiceHub
+              Continue
             </button>
-          </div>
-        </form>
-
-        <div className="mt-6 text-center text-sm text-gray-500">
-          <p>Create rooms, chat with friends, no sign up needed</p>
+          </form>
         </div>
       </div>
     );
@@ -587,443 +434,341 @@ export default function App() {
 
   if (view === 'lobby') {
     return (
-      <div className="min-h-screen bg-gray-900 text-white p-6">
-        <div className="max-w-6xl mx-auto">
-          <div className="mb-8">
-            <div className="flex justify-between items-start mb-6">
-              <div className="flex-1">
-                <div className="flex items-center gap-3 mb-3">
-                  <div className="w-8 h-8 bg-gradient-to-r from-blue-600 to-purple-600 rounded-lg flex items-center justify-center">
-                    <div className="text-white font-bold text-sm">V</div>
-                  </div>
-                  <h1 className="text-3xl font-bold text-white">
-                    VoiceHub
-                  </h1>
-                </div>
-                <div className="flex items-center gap-3">
-                  <div className="px-3 py-1 rounded-full bg-gray-700 border border-gray-600">
-                    <span className="text-sm">Welcome, </span>
-                    <span className="text-sm font-medium text-blue-400">{username}</span>
-                  </div>
-                  <div className={`px-3 py-1 rounded-full ${connected ? 'bg-green-900 border-green-700' : 'bg-red-900 border-red-700'} border`}>
-                    <span className="text-sm flex items-center gap-2">
-                      <span className={`w-2 h-2 rounded-full ${connected ? 'bg-green-400' : 'bg-red-400'}`}></span>
-                      {connected ? 'Connected' : 'Disconnected'}
-                    </span>
-                  </div>
-                  <button
-                    onClick={handleLogout}
-                    className="bg-red-600 hover:bg-red-700 rounded-lg px-3 py-1 text-sm font-medium transition-colors"
-                  >
-                    Logout
-                  </button>
-                </div>
+      <div className="min-h-screen bg-[#0f0f0f] text-white">
+        <div className="max-w-2xl mx-auto px-6 py-8">
+
+          {/* Header */}
+          <div className="flex items-center justify-between mb-8 anim-fade-in">
+            <div className="flex items-center gap-2.5">
+              <div className="w-7 h-7 rounded-md bg-white/10 flex items-center justify-center">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
+                  <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+                  <line x1="12" y1="19" x2="12" y2="23"/>
+                  <line x1="8" y1="23" x2="16" y2="23"/>
+                </svg>
               </div>
-              <button
-                onClick={() => setShowCreateRoom(true)}
-                className="bg-blue-600 hover:bg-blue-700 rounded-lg px-4 py-2 font-medium transition-colors flex items-center gap-2"
-              >
-                <span>Create Room</span>
-              </button>
+              <span className="font-semibold tracking-tight">VoiceHub</span>
             </div>
 
-            <div className="grid grid-cols-3 gap-4">
-              <div className="bg-gray-800 rounded-lg p-4 border border-gray-700">
-                <div className="text-2xl font-bold text-blue-400">{rooms.length}</div>
-                <div className="text-sm text-gray-400">Rooms Available</div>
+            <div className="flex items-center gap-3">
+              <div className="flex items-center gap-1.5 text-xs text-white/40">
+                <span className={`w-1.5 h-1.5 rounded-full ${connected ? 'bg-emerald-400' : 'bg-red-400'}`}/>
+                <span className="font-medium text-white/60">{username}</span>
               </div>
-              <div className="bg-gray-800 rounded-lg p-4 border border-gray-700">
-                <div className="text-2xl font-bold text-green-400">{rooms.reduce((acc, r) => acc + r.userCount, 0)}</div>
-                <div className="text-sm text-gray-400">People Chatting</div>
-              </div>
-              <div className="bg-gray-800 rounded-lg p-4 border border-gray-700">
-                <div className="text-2xl font-bold text-purple-400">Server</div>
-                <div className="text-sm text-gray-400">Voice Mode</div>
-              </div>
+              <button
+                onClick={handleLogout}
+                className="text-xs text-white/30 hover:text-white/60 transition-colors px-2 py-1 rounded hover:bg-white/5"
+              >
+                Log out
+              </button>
             </div>
           </div>
 
-          {showCreateRoom && (
-            <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={() => setShowCreateRoom(false)}>
-              <div className="bg-gray-800 p-6 rounded-lg shadow-lg w-full max-w-md border border-gray-700" onClick={(e) => e.stopPropagation()}>
-                <h2 className="text-xl font-bold mb-4 text-white">Create a Room</h2>
-                <div className="mb-4">
-                  <label className="block text-sm font-medium text-gray-300 mb-2">Room name</label>
-                  <input
-                    className="w-full p-3 rounded-lg bg-gray-700 border border-gray-600 focus:outline-none focus:border-blue-500 text-white placeholder-gray-400"
-                    placeholder="Friends Hangout"
-                    value={newRoomName}
-                    onChange={e => setNewRoomName(e.target.value)}
-                    autoFocus
-                  />
-                </div>
-                <div className="flex gap-3">
-                  <button
-                    onClick={() => setShowCreateRoom(false)}
-                    className="flex-1 bg-gray-600 hover:bg-gray-500 rounded-lg p-3 font-medium transition-colors"
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    onClick={createRoom}
-                    className="flex-1 bg-blue-600 hover:bg-blue-700 rounded-lg p-3 font-medium transition-colors"
-                  >
-                    Create Room
-                  </button>
-                </div>
-              </div>
-            </div>
-          )}
+          {/* Section title + new room */}
+          <div className="flex items-center justify-between mb-4">
+            <h2 className="text-xs uppercase tracking-widest text-white/30 font-medium">Rooms</h2>
+            <button
+              onClick={() => setShowCreateRoom(true)}
+              className="flex items-center gap-1.5 text-xs text-white/50 hover:text-white transition-colors px-2.5 py-1.5 rounded-md hover:bg-white/5 border border-transparent hover:border-white/10"
+            >
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
+              </svg>
+              New room
+            </button>
+          </div>
 
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-            {rooms.length === 0 ? (
-              <div className="col-span-full">
-                <div className="bg-gray-800 rounded-lg p-12 text-center border border-gray-700">
-                  <div className="w-16 h-16 mx-auto bg-gray-700 rounded-full flex items-center justify-center mb-4">
-                    <div className="text-gray-400 font-bold text-lg">?</div>
-                  </div>
-                  <p className="text-lg font-medium text-gray-300 mb-2">No rooms yet</p>
-                  <p className="text-gray-400 mb-6">Create one and invite your friends to join!</p>
-                  <button
-                    onClick={() => setShowCreateRoom(true)}
-                    className="bg-blue-600 hover:bg-blue-700 rounded-lg px-6 py-3 font-medium transition-colors inline-flex items-center gap-2"
-                  >
-                    <span>Create Your First Room</span>
-                  </button>
-                </div>
-              </div>
-            ) : (
-              rooms.map((room, idx) => (
-                <div 
-                  key={room.name} 
-                  className="bg-gray-800 rounded-lg p-4 border border-gray-700 hover:border-blue-500 transition-colors cursor-pointer"
+          {/* Room list */}
+          {rooms.length === 0 ? (
+            <div className="py-16 text-center anim-fade-in">
+              <p className="text-white/25 text-sm">No rooms yet — create one.</p>
+            </div>
+          ) : (
+            <div className="space-y-1.5">
+              {rooms.map((room, i) => (
+                <div
+                  key={room.name}
+                  className="group flex items-center justify-between px-4 py-3.5 rounded-xl bg-white/[0.03] hover:bg-white/[0.06] border border-white/[0.06] hover:border-white/[0.12] transition-all anim-fade-up"
+                  style={{ animationDelay: `${i * 40}ms` }}
                 >
-                  <div className="flex justify-between items-start mb-4">
-                    <div className="flex-1">
-                      <div className="flex items-center gap-2 mb-2">
-                        <div className="w-2 h-2 bg-green-400 rounded-full"></div>
-                        <h3 className="text-lg font-bold text-white">
-                          {room.name}
-                        </h3>
+                  <div className="flex items-center gap-3 min-w-0">
+                    <div className="relative flex-shrink-0">
+                      <div className="w-8 h-8 rounded-full bg-white/8 flex items-center justify-center text-xs font-semibold text-white/70">
+                        {room.name.charAt(0).toUpperCase()}
                       </div>
-                      <div className="flex items-center gap-2 text-sm text-gray-400">
-                        <span className="text-xs bg-gray-700 px-2 py-1 rounded">Creator</span>
-                        <span>{room.creator}</span>
-                      </div>
+                      {room.userCount > 0 && (
+                        <span className="absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full bg-emerald-400 border-2 border-[#0f0f0f]"/>
+                      )}
                     </div>
+                    <div className="min-w-0">
+                      <p className="text-sm font-medium text-white/90 truncate">{room.name}</p>
+                      <p className="text-xs text-white/30 truncate">{room.userCount} {room.userCount === 1 ? 'person' : 'people'}</p>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-2 flex-shrink-0">
                     {room.creator === username && (
                       <button
                         onClick={(e) => { e.stopPropagation(); deleteRoom(room.name); }}
-                        className="text-red-400 hover:text-red-300 transition-colors px-2 py-1 rounded text-sm font-medium"
-                        title="Delete room"
+                        className="text-xs text-white/20 hover:text-red-400 transition-colors px-2 py-1 rounded opacity-0 group-hover:opacity-100"
                       >
                         Delete
                       </button>
                     )}
-                  </div>
-                  
-                  <div className="flex items-center justify-between pt-3 border-t border-gray-700">
-                    <div className="flex items-center gap-2 px-2 py-1 rounded bg-gray-700">
-                      <div className="w-3 h-3 bg-green-400 rounded-full"></div>
-                      <span className="font-medium text-green-400">{room.userCount}</span>
-                      <span className="text-sm text-gray-400">online</span>
-                    </div>
                     <button
                       onClick={() => joinRoom(room.name)}
-                      className="bg-blue-600 hover:bg-blue-700 rounded-lg px-4 py-2 font-medium transition-colors"
+                      className="text-xs font-medium bg-white/8 hover:bg-white/14 text-white/70 hover:text-white rounded-lg px-3 py-1.5 transition-all active:scale-95"
                     >
                       Join
                     </button>
                   </div>
                 </div>
-              ))
-            )}
-          </div>
+              ))}
+            </div>
+          )}
         </div>
+
+        {/* Create room modal */}
+        {showCreateRoom && (
+          <div
+            className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 anim-fade-in"
+            onClick={() => setShowCreateRoom(false)}
+          >
+            <div
+              className="bg-[#1a1a1a] border border-white/10 rounded-2xl p-6 w-full max-w-sm mx-4 anim-scale-in"
+              onClick={e => e.stopPropagation()}
+            >
+              <h3 className="text-sm font-semibold mb-4">Create a room</h3>
+              <input
+                className="w-full bg-white/5 border border-white/10 rounded-lg px-3.5 py-2.5 text-sm text-white placeholder-white/20 focus:outline-none focus:border-white/30 transition-colors mb-3"
+                placeholder="Room name"
+                value={newRoomName}
+                onChange={e => setNewRoomName(e.target.value)}
+                onKeyDown={e => e.key === 'Enter' && createRoom()}
+                autoFocus
+              />
+              <div className="flex gap-2">
+                <button
+                  onClick={() => setShowCreateRoom(false)}
+                  className="flex-1 py-2.5 rounded-lg text-sm text-white/40 hover:text-white/70 hover:bg-white/5 transition-all"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={createRoom}
+                  className="flex-1 py-2.5 rounded-lg text-sm font-semibold bg-white text-black hover:bg-white/90 active:scale-[0.98] transition-all"
+                >
+                  Create
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     );
   }
 
   if (view === 'room') {
     return (
-    <div className="min-h-screen bg-gray-900 text-white p-6">
-      <div className="max-w-6xl mx-auto">
-        <div className="bg-gray-800 rounded-lg p-4 mb-6 border border-gray-700">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-3">
-              <div className="w-10 h-10 bg-gradient-to-r from-blue-600 to-purple-600 rounded-lg flex items-center justify-center">
-                <div className="text-white font-bold">V</div>
-              </div>
-              <div>
-                <div className="text-sm text-gray-400 mb-1">You're in</div>
-                <h2 className="text-xl font-bold text-white">
-                  {currentRoom}
-                </h2>
-              </div>
-            </div>
-            <div className="flex items-center gap-3">
-              <div className={`px-3 py-1 rounded-full ${connected ? 'bg-green-900 border-green-700' : 'bg-red-900 border-red-700'} border flex items-center gap-2`}>
-                <span className={`w-2 h-2 rounded-full ${connected ? 'bg-green-400' : 'bg-red-400'}`}></span>
-                <span className="text-sm">{connected ? 'Connected' : 'Disconnected'}</span>
-              </div>
-              <button 
-                className="bg-red-600 hover:bg-red-700 rounded-lg px-4 py-2 font-medium transition-colors" 
-                onClick={leaveRoom}
-              >
-                Leave Room
-              </button>
-            </div>
-          </div>
-        </div>
-        
-        <div className="grid grid-cols-1 lg:grid-cols-4 gap-6 mb-6">
-          <div className="lg:col-span-1 bg-gradient-to-br from-slate-800/80 to-slate-900/80 backdrop-blur-xl rounded-2xl p-6 border-2 border-slate-700/50 shadow-xl">
-            <div className="flex items-center gap-3 mb-6">
-              <div className="w-8 h-8 bg-gradient-to-r from-slate-600 to-slate-700 rounded-lg flex items-center justify-center">
-                <div className="text-white font-bold text-sm">U</div>
-              </div>
-              <div className="flex-1">
-                <h2 className="font-bold text-xl text-white">In this room</h2>
-                <p className="text-sm text-blue-400">{users.length} {users.length === 1 ? 'person' : 'people'}</p>
-              </div>
-            </div>
-            <div className="space-y-3 max-h-[500px] overflow-y-auto custom-scrollbar">
-              {users.map((u, idx) => (
-                <div 
-                  key={u.id} 
-                  className="group flex items-center gap-3 bg-gradient-to-r from-slate-700/30 to-slate-800/30 hover:from-slate-700/60 hover:to-slate-800/60 p-4 rounded-xl transition-all duration-300 border border-slate-700/30 hover:border-blue-500/50"
-                  style={{ animationDelay: `${idx * 50}ms` }}
-                >
-                  <div className="relative">
-                    <div className="w-10 h-10 rounded-full bg-gradient-to-br from-blue-500 to-purple-500 flex items-center justify-center font-bold text-white">
-                      {u.name.charAt(0).toUpperCase()}
-                    </div>
-                    <div className="absolute -bottom-1 -right-1 w-4 h-4 bg-green-400 rounded-full border-2 border-slate-900 animate-pulse"></div>
-                  </div>
-                  <div className="flex-1 min-w-0">
-                    <div className="font-semibold text-white truncate">{u.name}</div>
-                    {u.id === socketRef.current?.id && (
-                      <div className="text-xs bg-blue-600 px-2 py-0.5 rounded inline-block mt-1">You</div>
-                    )}
-                  </div>
-                  <div className="text-xl group-hover:scale-125 transition-transform">
-                    <div className="w-6 h-6 bg-green-500 rounded-full flex items-center justify-center">
-                      <div className="w-3 h-3 bg-white rounded-full"></div>
-                    </div>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-          
-          <div className="lg:col-span-3 bg-gray-800 rounded-lg p-4 border border-gray-700 flex flex-col">
-            <div className="flex items-center gap-3 mb-4">
-              <div className="w-6 h-6 bg-gradient-to-r from-blue-600 to-purple-600 rounded-lg flex items-center justify-center">
-                <div className="text-white font-bold text-xs">C</div>
-              </div>
-              <div className="flex-1">
-                <h2 className="font-bold text-lg text-white">Chat</h2>
-                <p className="text-sm text-gray-400">Send a message to everyone</p>
-              </div>
-            </div>
-            
-            <div className="flex-1 overflow-y-auto mb-4 space-y-2 min-h-[400px] max-h-[400px] pr-2">
-              {messages.map((m, i) => (
-                <div key={i} className={m.user === 'system' ? 'text-center' : ''}>
-                  {m.user === 'system' ? (
-                    <div className="inline-block px-3 py-1 rounded-full bg-gray-700 text-gray-400 text-sm">
-                      {m.text}
-                    </div>
-                  ) : (
-                    <div className="flex items-start gap-2">
-                      <div className="w-6 h-6 rounded-full bg-blue-600 flex items-center justify-center font-bold text-white text-xs flex-shrink-0">
-                        {m.user.charAt(0).toUpperCase()}
-                      </div>
-                      <div className="flex-1 bg-gray-700 rounded-lg p-3">
-                        <div className="font-medium text-blue-400 mb-1 text-sm">{m.user}</div>
-                        <div className="text-white break-words">{m.text}</div>
-                      </div>
-                    </div>
-                  )}
-                </div>
-              ))}
-            </div>
+      <div className="min-h-screen bg-[#0f0f0f] text-white">
+        <div className="max-w-5xl mx-auto px-6 py-8">
 
-            <form onSubmit={handleSend} className="flex gap-2">
-              <input
-                className="flex-1 p-3 rounded-lg bg-gray-700 border border-gray-600 focus:outline-none focus:border-blue-500 text-white placeholder-gray-400"
-                placeholder="Say something..."
-                value={message}
-                onChange={e => setMessage(e.target.value)}
-              />
-              <button 
-                className="bg-blue-600 hover:bg-blue-700 rounded-lg px-4 py-3 font-medium transition-colors" 
-                type="submit"
-              >
-                Send
-              </button>
-            </form>
-          </div>
-        </div>
-        
-        <div className="bg-gradient-to-br from-slate-800/80 to-slate-900/80 backdrop-blur-xl rounded-2xl p-8 border-2 border-slate-700/50 shadow-xl">
-          <div className="flex items-center justify-between mb-6">
-            <div className="flex items-center gap-6">
-              <div className="w-12 h-12 bg-gradient-to-r from-blue-600 to-purple-600 rounded-full flex items-center justify-center">
-                <div className="text-white font-bold text-lg">{isMuted ? 'M' : 'LIVE'}</div>
-              </div>
-              <div>
-                <h3 className="text-2xl font-bold text-white mb-1">Your Microphone</h3>
-                <p className="text-gray-400">
-                  {isMuted ? 'Currently muted' : 'Broadcasting live'}
-                  {isNoiseCancellationEnabled && !isMuted && (
-                    <span className="ml-2 text-green-400 text-xs">Noise Canceled</span>
-                  )}
-                </p>
-              </div>
+          {/* Room header */}
+          <div className="flex items-center justify-between mb-6 anim-fade-in">
+            <div className="flex items-center gap-3">
+              <div className="w-2 h-2 rounded-full bg-emerald-400 shadow-[0_0_8px_#4ade80]"/>
+              <h1 className="font-semibold text-white/90">{currentRoom}</h1>
+              <span className="text-xs text-white/25">{users.length} {users.length === 1 ? 'person' : 'people'}</span>
             </div>
-            <div className="flex items-center gap-4">
-              <button
-                onClick={() => setIsNoiseCancellationEnabled(prev => !prev)}
-                className={`rounded-xl px-6 py-4 font-bold text-sm transition-all duration-300 shadow-xl flex items-center gap-2 ${
-                  isNoiseCancellationEnabled
-                    ? 'bg-gradient-to-r from-green-600 to-emerald-600 hover:from-green-700 hover:to-emerald-700 hover:shadow-green-500/50'
-                    : 'bg-gradient-to-r from-gray-600 to-slate-600 hover:from-gray-700 hover:to-slate-700 hover:shadow-gray-500/50'
-                } hover:scale-105 transform`}
-              >
-                <div className="w-4 h-4 bg-white rounded-full"></div>
-                <span>{isNoiseCancellationEnabled ? 'Noise Cancel ON' : 'Noise Cancel OFF'}</span>
-              </button>
-              <button
-                onClick={isScreenSharing ? stopScreenShare : startScreenShare}
-                className={`rounded-xl px-8 py-5 font-bold text-lg transition-all duration-300 shadow-xl flex items-center gap-3 ${
-                  isScreenSharing 
-                    ? 'bg-gradient-to-r from-orange-600 to-red-600 hover:from-orange-700 hover:to-red-700 hover:shadow-orange-500/50' 
-                    : 'bg-gradient-to-r from-indigo-600 to-blue-600 hover:from-indigo-700 hover:to-blue-700 hover:shadow-indigo-500/50'
-                } hover:scale-105 transform`}
-              >
-                <div className="w-6 h-6 bg-white rounded flex items-center justify-center">
-                  <div className="w-4 h-3 bg-gray-800 rounded"></div>
-                </div>
-                <span>{isScreenSharing ? 'Stop Sharing' : 'Share Screen'}</span>
-              </button>
-              <button
-                className={`rounded-xl px-10 py-5 font-bold text-lg transition-all duration-300 shadow-xl flex items-center gap-3 ${
-                  isMuted 
-                    ? 'bg-gradient-to-r from-red-600 to-rose-600 hover:from-red-700 hover:to-rose-700 hover:shadow-red-500/50' 
-                    : 'bg-gradient-to-r from-green-600 to-emerald-600 hover:from-green-700 hover:to-emerald-700 hover:shadow-green-500/50'
-                } hover:scale-105 transform`}
-              onClick={() => setIsMuted(m => !m)}
+            <button
+              onClick={leaveRoom}
+              className="text-xs text-white/30 hover:text-red-400 transition-colors px-3 py-1.5 rounded-lg hover:bg-red-500/10 border border-transparent hover:border-red-500/20"
             >
-              <div className={`w-6 h-6 rounded-full flex items-center justify-center ${
-                isMuted ? 'bg-white' : 'bg-white'
-              }`}>
-                <div className={`w-3 h-3 rounded-full ${
-                  isMuted ? 'bg-red-600' : 'bg-green-600'
-                }`}></div>
-              </div>
-              <span>{isMuted ? 'Turn On' : 'Turn Off'}</span>
+              Leave
             </button>
           </div>
-          
-          <div className="mt-4 space-y-4">
-            <div>
-              <div className="flex items-center justify-between mb-2">
-                <span className="text-sm text-gray-400">Volume Level</span>
-                <span className="text-sm text-gray-300">{Math.round(micLevel)}%</span>
+
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+
+            {/* Left: users + mic controls */}
+            <div className="space-y-4">
+              {/* Participants */}
+              <div className="bg-white/[0.03] border border-white/[0.06] rounded-2xl p-4 anim-fade-up">
+                <p className="text-xs uppercase tracking-widest text-white/25 font-medium mb-3">Participants</p>
+                <div className="space-y-1 max-h-64 overflow-y-auto custom-scrollbar">
+                  {users.map(u => (
+                    <div key={u.id} className="flex items-center gap-2.5 px-2 py-2 rounded-lg hover:bg-white/[0.04] transition-colors">
+                      <div className="relative">
+                        <div className="w-7 h-7 rounded-full bg-white/8 flex items-center justify-center text-xs font-semibold text-white/70">
+                          {u.name.charAt(0).toUpperCase()}
+                        </div>
+                        {/* Live indicator bars */}
+                        {u.id === socketId && !isMuted && (
+                          <div className="absolute -right-1 -bottom-1 flex items-end gap-[2px]">
+                            <div className="w-[2px] h-[6px] bg-emerald-400 rounded-full bar-1 origin-bottom"/>
+                            <div className="w-[2px] h-[9px] bg-emerald-400 rounded-full bar-2 origin-bottom"/>
+                            <div className="w-[2px] h-[6px] bg-emerald-400 rounded-full bar-3 origin-bottom"/>
+                          </div>
+                        )}
+                      </div>
+                      <span className="text-sm text-white/80">{u.name}</span>
+                      {u.id === socketId && (
+                        <span className="ml-auto text-[10px] text-white/25">you</span>
+                      )}
+                    </div>
+                  ))}
+                </div>
               </div>
-              <div className="h-3 bg-gray-700 rounded-full overflow-hidden border border-gray-600">
-                <div 
-                  className={`h-full transition-all duration-75 rounded-full ${
-                    isMuted 
-                      ? 'bg-gray-500'
-                      : micLevel > 70 
-                        ? 'bg-red-500'
-                        : micLevel > 30
-                          ? 'bg-yellow-500'
-                          : 'bg-green-500'
-                  }`}
-                  style={{ width: `${isMuted ? 0 : micLevel}%` }}
-                />
-              </div>
-              <div className="flex justify-between mt-1 text-xs text-gray-500">
-                <span>Quiet</span>
-                <span>Loud</span>
+
+              {/* Mic controls */}
+              <div className="bg-white/[0.03] border border-white/[0.06] rounded-2xl p-4 anim-fade-up" style={{ animationDelay: '60ms' }}>
+                <p className="text-xs uppercase tracking-widest text-white/25 font-medium mb-3">Microphone</p>
+
+                {/* Volume bar */}
+                <div className="mb-4">
+                  <div className="h-1 bg-white/8 rounded-full overflow-hidden">
+                    <div
+                      className={`h-full rounded-full transition-all duration-75 ${
+                        isMuted ? 'bg-white/10' : micLevel > 70 ? 'bg-red-400' : micLevel > 30 ? 'bg-amber-400' : 'bg-emerald-400'
+                      }`}
+                      style={{ width: `${isMuted ? 0 : micLevel}%` }}
+                    />
+                  </div>
+                </div>
+
+                <div className="space-y-2">
+                  <button
+                    onClick={() => setIsMuted(m => !m)}
+                    className={`w-full flex items-center justify-between px-3.5 py-2.5 rounded-xl text-sm font-medium transition-all active:scale-[0.98] ${
+                      isMuted
+                        ? 'bg-red-500/15 text-red-400 border border-red-500/25 hover:bg-red-500/20'
+                        : 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 hover:bg-emerald-500/15'
+                    }`}
+                  >
+                    <span>{isMuted ? 'Unmute' : 'Mute'}</span>
+                    <div className={`w-4 h-4 rounded-full border-2 ${isMuted ? 'border-red-400 bg-red-400/30' : 'border-emerald-400 bg-emerald-400/30'}`}/>
+                  </button>
+
+                  <button
+                    onClick={() => setIsNoiseCancellationEnabled(p => !p)}
+                    className={`w-full flex items-center justify-between px-3.5 py-2.5 rounded-xl text-sm transition-all active:scale-[0.98] ${
+                      isNoiseCancellationEnabled
+                        ? 'bg-white/6 text-white/70 border border-white/10 hover:bg-white/10'
+                        : 'bg-transparent text-white/30 border border-white/6 hover:bg-white/4'
+                    }`}
+                  >
+                    <span>Noise cancel</span>
+                    <div className={`w-7 h-4 rounded-full transition-colors relative ${isNoiseCancellationEnabled ? 'bg-white/30' : 'bg-white/8'}`}>
+                      <div className={`absolute top-0.5 w-3 h-3 bg-white rounded-full shadow transition-all ${isNoiseCancellationEnabled ? 'left-3.5' : 'left-0.5'}`}/>
+                    </div>
+                  </button>
+
+                  {isNoiseCancellationEnabled && (
+                    <div className="px-1 anim-fade-in">
+                      <div className="flex justify-between text-xs text-white/25 mb-1.5">
+                        <span>Noise reduction</span>
+                        <span>{Math.round(noiseReductionLevel * 100)}%</span>
+                      </div>
+                      <input
+                        type="range" min="0.1" max="1" step="0.1"
+                        value={noiseReductionLevel}
+                        onChange={e => setNoiseReductionLevel(parseFloat(e.target.value))}
+                        className="w-full h-1 bg-white/8 rounded-lg appearance-none cursor-pointer slider"
+                      />
+                    </div>
+                  )}
+
+                  <button
+                    onClick={isScreenSharing ? stopScreenShare : startScreenShare}
+                    className={`w-full flex items-center justify-between px-3.5 py-2.5 rounded-xl text-sm transition-all active:scale-[0.98] ${
+                      isScreenSharing
+                        ? 'bg-amber-500/15 text-amber-400 border border-amber-500/25 hover:bg-amber-500/20'
+                        : 'bg-white/4 text-white/40 border border-white/8 hover:bg-white/8 hover:text-white/60'
+                    }`}
+                  >
+                    <span>{isScreenSharing ? 'Stop sharing' : 'Share screen'}</span>
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/>
+                    </svg>
+                  </button>
+                </div>
               </div>
             </div>
-            
-            {isNoiseCancellationEnabled && (
-              <div>
-                <div className="flex items-center justify-between mb-2">
-                  <span className="text-sm text-gray-400">Noise Reduction Level</span>
-                  <span className="text-sm text-gray-300">{Math.round(noiseReductionLevel * 100)}%</span>
-                </div>
+
+            {/* Right: chat */}
+            <div className="lg:col-span-2 bg-white/[0.03] border border-white/[0.06] rounded-2xl flex flex-col anim-fade-up" style={{ animationDelay: '30ms' }}>
+              <div className="px-4 pt-4 pb-3 border-b border-white/[0.06]">
+                <p className="text-xs uppercase tracking-widest text-white/25 font-medium">Chat</p>
+              </div>
+
+              <div className="flex-1 overflow-y-auto custom-scrollbar px-4 py-3 space-y-2 min-h-[360px] max-h-[420px]">
+                {messages.map((m, i) => (
+                  <div key={i}>
+                    {m.user === 'system' ? (
+                      <p className="text-center text-xs text-white/20 py-1">{m.text}</p>
+                    ) : (
+                      <div className="flex items-start gap-2.5">
+                        <div className="w-6 h-6 flex-shrink-0 rounded-full bg-white/8 flex items-center justify-center text-[10px] font-semibold text-white/50 mt-0.5">
+                          {m.user.charAt(0).toUpperCase()}
+                        </div>
+                        <div>
+                          <span className="text-xs text-white/30 mr-1.5">{m.user}</span>
+                          <span className="text-sm text-white/80 break-words">{m.text}</span>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+
+              <form onSubmit={handleSend} className="px-4 py-3 border-t border-white/[0.06] flex gap-2">
                 <input
-                  type="range"
-                  min="0.1"
-                  max="1"
-                  step="0.1"
-                  value={noiseReductionLevel}
-                  onChange={(e) => setNoiseReductionLevel(parseFloat(e.target.value))}
-                  className="w-full h-2 bg-gray-700 rounded-lg appearance-none cursor-pointer slider"
+                  className="flex-1 bg-white/5 border border-white/8 rounded-xl px-3.5 py-2 text-sm text-white placeholder-white/20 focus:outline-none focus:border-white/20 transition-colors"
+                  placeholder="Message…"
+                  value={message}
+                  onChange={e => setMessage(e.target.value)}
                 />
-                <div className="flex justify-between mt-1 text-xs text-gray-500">
-                  <span>Less</span>
-                  <span>More</span>
-                </div>
-              </div>
-            )}
+                <button
+                  type="submit"
+                  className="px-4 py-2 rounded-xl bg-white/8 hover:bg-white/14 text-white/60 hover:text-white text-sm font-medium transition-all active:scale-95"
+                >
+                  Send
+                </button>
+              </form>
+            </div>
           </div>
+
+          {/* Screen share view */}
+          {screenSharer && (
+            <div className="mt-4 bg-white/[0.03] border border-white/[0.06] rounded-2xl overflow-hidden anim-scale-in">
+              <div className="flex items-center justify-between px-4 py-3 border-b border-white/[0.06]">
+                <div className="flex items-center gap-2">
+                  <div className="w-2 h-2 rounded-full bg-amber-400 shadow-[0_0_6px_#fbbf24]"/>
+                  <span className="text-sm text-white/60">
+                    <span className="text-white/80 font-medium">{screenSharer}</span> is sharing
+                  </span>
+                </div>
+                <button
+                  onClick={() => {
+                    const v = remoteVideoRef.current;
+                    if (!v) return;
+                    if (document.fullscreenElement === v) document.exitFullscreen();
+                    else v.requestFullscreen().catch(() => {});
+                  }}
+                  className="text-xs text-white/30 hover:text-white/60 transition-colors px-2 py-1 rounded hover:bg-white/5"
+                >
+                  Fullscreen
+                </button>
+              </div>
+              <div className="bg-black">
+                <video ref={remoteVideoRef} autoPlay playsInline className="w-full h-auto max-h-[560px] object-contain"/>
+              </div>
+            </div>
+          )}
+
         </div>
-        
-      
-        {screenSharer && (
-          <div className="mt-6 bg-gray-800 rounded-lg p-4 border border-gray-700">
-            <div className="flex items-center justify-between mb-4">
-              <div className="flex items-center gap-3">
-                <div className="w-6 h-6 bg-gradient-to-r from-blue-600 to-purple-600 rounded flex items-center justify-center">
-                  <div className="w-4 h-3 bg-white rounded"></div>
-                </div>
-                <div>
-                  <h3 className="text-lg font-bold text-white">Screen Share</h3>
-                  <p className="text-sm text-gray-400">{screenSharer} is sharing their screen</p>
-                </div>
-              </div>
-              <button
-                onClick={() => {
-                  const v = remoteVideoRef.current;
-                  if (!v) return;
-                  if (document.fullscreenElement === v) {
-                    document.exitFullscreen();
-                  } else {
-                    v.requestFullscreen().catch(e => console.log('Fullscreen error:', e));
-                  }
-                }}
-                className="bg-gray-700 hover:bg-gray-600 rounded-lg px-3 py-2 text-sm font-medium transition-colors flex items-center gap-2"
-              >
-                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-                  <polyline points="15 3 21 3 21 9"></polyline>
-                  <polyline points="9 21 3 21 3 15"></polyline>
-                  <line x1="21" y1="3" x2="14" y2="10"></line>
-                  <line x1="3" y1="21" x2="10" y2="14"></line>
-                </svg>
-                Tam Ekran
-              </button>
-            </div>
-            <div className="bg-black rounded-lg overflow-hidden border border-gray-600">
-              <video
-                ref={remoteVideoRef}
-                autoPlay
-                playsInline
-                muted
-                className="w-full h-auto max-h-[600px] object-contain"
-              />
-            </div>
-          </div>
-        )}
       </div>
-    </div>
-    </div>
     );
   }
 
