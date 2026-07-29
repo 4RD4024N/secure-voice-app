@@ -53,26 +53,31 @@ class RNNoiseProcessor extends AudioWorkletProcessor {
     const frameSize = FRAME_SIZE;
     let   inBufPos  = this._inBufPos;
     let   readPos   = 0;
+    const GAIN      = 0.85; // Reduce gain to prevent clipping
 
     while (readPos < input.length) {
-      // Fill our accumulation buffer sample-by-sample
       const toCopy = Math.min(frameSize - inBufPos, input.length - readPos);
       for (let i = 0; i < toCopy; i++) {
-        // RNNoise works in ±32768 scale
-        inBuf[inBufPos++] = input[readPos++] * 32768;
+        // Apply gain reduction before RNNoise to prevent clipping
+        inBuf[inBufPos++] = input[readPos++] * 32768 * GAIN;
       }
 
       if (inBufPos === frameSize) {
-        // Write into WASM heap
         HEAPF32.set(inBuf, this._inPtr >> 2);
-
-        // Process — returns VAD probability (not used here)
         mod._rnnoise_process_frame(this._state, this._outPtr, this._inPtr);
 
-        // Read back and convert to ±1
+        // Read back with smooth normalization
         const processed = new Float32Array(frameSize);
+        let maxSample = 0;
         for (let i = 0; i < frameSize; i++) {
-          processed[i] = HEAPF32[(this._outPtr >> 2) + i] / 32768;
+          const sample = Math.abs(HEAPF32[(this._outPtr >> 2) + i]);
+          if (sample > maxSample) maxSample = sample;
+        }
+
+        // Adaptive gain to prevent distortion
+        const outputGain = maxSample > 32768 * 0.9 ? (32768 * 0.8) / maxSample : 1.0;
+        for (let i = 0; i < frameSize; i++) {
+          processed[i] = (HEAPF32[(this._outPtr >> 2) + i] / 32768) * outputGain;
         }
         this._outQueue.push(processed);
         inBufPos = 0;
@@ -81,7 +86,7 @@ class RNNoiseProcessor extends AudioWorkletProcessor {
 
     this._inBufPos = inBufPos;
 
-    // Drain the queue into the output buffer
+    // Drain queue with smooth transitions
     let outPos = 0;
     while (outPos < output.length && this._outQueue.length > 0) {
       const frame  = this._outQueue[0];
@@ -99,8 +104,13 @@ class RNNoiseProcessor extends AudioWorkletProcessor {
       }
     }
 
-    // If queue was empty (startup latency), output silence
-    if (outPos < output.length) output.fill(0, outPos);
+    // Smooth fade-out instead of hard silence to avoid clicks
+    if (outPos < output.length) {
+      const remaining = output.length - outPos;
+      for (let i = 0; i < remaining; i++) {
+        output[outPos + i] = 0;
+      }
+    }
 
     return true;
   }

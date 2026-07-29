@@ -32,6 +32,8 @@ export default function App() {
   const animationFrameRef   = useRef();
   const peersRef            = useRef({});
   const remoteStreamsRef    = useRef({});
+  const remoteAudioRef      = useRef({});
+  const screenSendersRef    = useRef({}); // userId -> RTCRtpSender[] for screen tracks
   const remoteVideoRef      = useRef();
   const gainNodeRef         = useRef();
   const processorRef        = useRef();
@@ -85,18 +87,38 @@ export default function App() {
       const streamToUse = processedStreamRef.current || streamRef.current;
       if (streamToUse) streamToUse.getTracks().forEach(t => pc.addTrack(t, streamToUse));
 
+      // If we're mid-screen-share, the newcomer needs those tracks too
+      if (screenStreamRef.current) {
+        screenSendersRef.current[userId] =
+          screenStreamRef.current.getTracks().map(t => pc.addTrack(t, screenStreamRef.current));
+      }
+
       pc.ontrack = (event) => {
-        const [remoteStream] = event.streams;
-        remoteStreamsRef.current[userId] = remoteStream;
-        if (event.track.kind === 'audio') {
-          const audio = new Audio();
-          audio.srcObject = remoteStream;
-          audio.autoplay  = true;
+        const track = event.track;
+
+        if (track.kind === 'audio') {
+          // One Audio element per track (not per peer): mic and screen audio
+          // arrive as separate tracks and must play simultaneously.
+          const key = `${userId}:${track.id}`;
+          let audio = remoteAudioRef.current[key];
+          if (!audio) {
+            audio = new Audio();
+            audio.autoplay = true;
+            remoteAudioRef.current[key] = audio;
+          }
+          audio.srcObject = new MediaStream([track]);
           audio.play().catch(() => {});
-          window._debugAudio = audio;
-        } else if (event.track.kind === 'video') {
+
+          // When the sharer stops, the track ends — release its element
+          track.onended = () => {
+            const a = remoteAudioRef.current[key];
+            if (a) { a.srcObject = null; delete remoteAudioRef.current[key]; }
+          };
+
+        } else if (track.kind === 'video') {
           if (remoteVideoRef.current) {
-            remoteVideoRef.current.srcObject = remoteStream;
+            const videoStream = new MediaStream([track]);
+            remoteVideoRef.current.srcObject = videoStream;
             remoteVideoRef.current.play().catch(() => {});
           }
         }
@@ -126,6 +148,13 @@ export default function App() {
       const pc = peersRef.current[userId];
       if (pc) { pc.close(); delete peersRef.current[userId]; }
       delete remoteStreamsRef.current[userId];
+      Object.keys(remoteAudioRef.current)
+        .filter(k => k.startsWith(`${userId}:`))
+        .forEach(k => {
+          remoteAudioRef.current[k].srcObject = null;
+          delete remoteAudioRef.current[k];
+        });
+      delete screenSendersRef.current[userId];
     });
 
     socket.on('offer', async ({ from, offer }) => {
@@ -191,23 +220,30 @@ export default function App() {
     let holdSamples = 0;
     let noisePower  = 1e-6;
     const HOLD      = 0.25 * sr;
-    const ATK       = 1 - Math.exp(-1 / (sr * 0.005));
-    const REL       = 1 - Math.exp(-1 / (sr * 0.08));
-    const N_ATK     = 1 - Math.exp(-1 / (sr * 2.0));
-    const N_REL     = 1 - Math.exp(-1 / (sr * 0.5));
+    const ATK       = 1 - Math.exp(-1 / (sr * 0.020)); // Increased from 0.005 to 0.020 (slower attack)
+    const REL       = 1 - Math.exp(-1 / (sr * 0.150)); // Increased from 0.08 to 0.150 (slower release)
+    const N_ATK     = 1 - Math.exp(-1 / (sr * 3.0)); // Increased from 2.0 (slower noise estimation attack)
+    const N_REL     = 1 - Math.exp(-1 / (sr * 1.0)); // Increased from 0.5 (slower noise estimation release)
+
     sp.onaudioprocess = (ev) => {
       const inp = ev.inputBuffer.getChannelData(0);
       const out = ev.outputBuffer.getChannelData(0);
       let sumSq = 0;
+
       for (let i = 0; i < inp.length; i++) sumSq += inp[i] * inp[i];
       const rms = Math.sqrt(sumSq / inp.length);
+
+      // Smooth noise floor estimation
       if (gateGain < 0.1) noisePower += N_ATK * (rms * rms - noisePower);
       else noisePower += N_REL * (Math.min(rms * rms * 0.05, noisePower) - noisePower);
+
       const snr = 20 * Math.log10((rms + 1e-10) / (Math.sqrt(Math.max(noisePower, 1e-10)) + 1e-10));
+
       let target;
       if (snr > 8) { holdSamples = HOLD; target = 1; }
       else if (holdSamples > 0) { holdSamples -= inp.length; target = 1; }
       else target = snr < 4 ? 0 : gateGain;
+
       for (let i = 0; i < inp.length; i++) {
         gateGain += (target > gateGain ? ATK : REL) * (target - gateGain);
         out[i] = inp[i] * gateGain;
@@ -250,6 +286,8 @@ export default function App() {
         analyserRef.current        = analyser;
         gainNodeRef.current        = gainNode;
 
+        gainNode.gain.value = 0.95; // Prevent clipping
+
         const connectChain = (middleNode) => {
           source.connect(gainNode);
           gainNode.connect(middleNode);
@@ -268,7 +306,6 @@ export default function App() {
             processorRef.current = rnnoiseNode;
             connectChain(rnnoiseNode);
           } catch (err) {
-            // AudioWorklet not available — fall back to RMS noise gate
             console.warn('[RNNoise] AudioWorklet failed, using fallback gate:', err);
             const sp = buildFallbackGate(audioContext);
             processorRef.current = sp;
@@ -303,15 +340,16 @@ export default function App() {
     socketRef.current.emit('screen-share-stopped');
 
     Object.entries(peersRef.current).forEach(async ([userId, pc]) => {
-      const sender = pc.getSenders().find(s => s.track?.kind === 'video');
-      if (sender) {
-        try {
-          pc.removeTrack(sender);
-          const offer = await pc.createOffer();
-          await pc.setLocalDescription(offer);
-          socketRef.current.emit('offer', { to: userId, offer });
-        } catch (err) { console.error('Renegotiation error:', err); }
-      }
+      const senders = screenSendersRef.current[userId] ||
+        pc.getSenders().filter(s => s.track?.kind === 'video');
+      if (senders.length === 0) return;
+      try {
+        senders.forEach(sender => { try { pc.removeTrack(sender); } catch { /* already removed */ } });
+        delete screenSendersRef.current[userId];
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+        socketRef.current.emit('offer', { to: userId, offer });
+      } catch (err) { console.error('Renegotiation error:', err); }
     });
   };
 
@@ -321,6 +359,9 @@ export default function App() {
     Object.values(peersRef.current).forEach(pc => pc.close());
     peersRef.current      = {};
     remoteStreamsRef.current = {};
+    Object.values(remoteAudioRef.current).forEach(a => { a.srcObject = null; });
+    remoteAudioRef.current = {};
+    screenSendersRef.current = {};
 
     streamRef.current?.getTracks().forEach(t => t.stop());
     streamRef.current = null;
@@ -349,16 +390,32 @@ export default function App() {
 
   const startScreenShare = async () => {
     try {
-      const screenStream = await navigator.mediaDevices.getDisplayMedia({ video: { cursor: 'always' }, audio: false });
+      // audio: true captures tab/system audio (user must tick "Share audio"
+      // in the browser dialog; Chrome shows it for tab and screen shares)
+      const screenStream = await navigator.mediaDevices.getDisplayMedia({
+        video: { cursor: 'always' },
+        audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
+      });
       screenStreamRef.current = screenStream;
       setIsScreenSharing(true);
       socketRef.current.emit('screen-share-started', { username });
 
+      const videoTrack = screenStream.getVideoTracks()[0];
+      const audioTrack = screenStream.getAudioTracks()[0]; // undefined if user didn't share audio
+
       for (const [userId, pc] of Object.entries(peersRef.current)) {
-        const videoTrack = screenStream.getVideoTracks()[0];
-        const sender = pc.getSenders().find(s => s.track?.kind === 'video');
-        if (sender) await sender.replaceTrack(videoTrack);
-        else pc.addTrack(videoTrack, screenStream);
+        const senders = [];
+        const videoSender = pc.getSenders().find(s => s.track?.kind === 'video');
+        if (videoSender) {
+          await videoSender.replaceTrack(videoTrack);
+          senders.push(videoSender);
+        } else {
+          senders.push(pc.addTrack(videoTrack, screenStream));
+        }
+        // Screen audio goes out as a SECOND audio track alongside the mic
+        if (audioTrack) senders.push(pc.addTrack(audioTrack, screenStream));
+        screenSendersRef.current[userId] = senders;
+
         try {
           const offer = await pc.createOffer();
           await pc.setLocalDescription(offer);
@@ -366,7 +423,7 @@ export default function App() {
         } catch (err) { console.error('Renegotiation error:', err); }
       }
 
-      screenStream.getVideoTracks()[0].onended = () => stopScreenShare();
+      videoTrack.onended = () => stopScreenShare();
     } catch (err) {
       if (err.name !== 'NotAllowedError') alert('Could not start screen sharing.');
     }
