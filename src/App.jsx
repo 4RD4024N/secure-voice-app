@@ -1,7 +1,142 @@
 import { useState, useRef, useEffect } from 'react';
 import { io } from 'socket.io-client';
+import { DeepFilterNet3Core } from 'deepfilternet3-noise-filter';
 
 const SOCKET_URL = window.location.origin;
+
+// DeepFilterNet3 model + WASM are self-hosted under public/deepfilternet3/v3/.
+// The core is created once and reused across room joins so the ~24 MB of
+// assets are only fetched and compiled once per page load.
+let dfCorePromise = null;
+const getDeepFilterCore = () => {
+  if (!dfCorePromise) {
+    const core = new DeepFilterNet3Core({
+      sampleRate: 48000,
+      noiseReductionLevel: 80,
+      assetConfig: { cdnUrl: '/deepfilternet3' },
+    });
+    dfCorePromise = core.initialize().then(() => core).catch(err => {
+      dfCorePromise = null;
+      throw err;
+    });
+  }
+  return dfCorePromise;
+};
+
+// Slider value (0.1–1) → DeepFilterNet attenuation limit in dB (10–100)
+const toAttenDb = (level) => Math.round(level * 100);
+
+const micConstraints = (deviceId) => ({
+  audio: {
+    ...(deviceId && { deviceId: { exact: deviceId } }),
+    echoCancellation: true,
+    // Browser NS is turned off: stacking it in front of DeepFilterNet
+    // produces warbly artifacts. It is re-enabled if DFN fails.
+    noiseSuppression: false,
+    autoGainControl: true,
+    channelCount: 1,
+    sampleRate: 48000,
+    sampleSize: 16,
+  },
+  video: false,
+});
+
+// Falls back to the system default if the saved device was unplugged
+const getMicStream = (deviceId) =>
+  navigator.mediaDevices.getUserMedia(micConstraints(deviceId)).catch(err => {
+    if (!deviceId) throw err;
+    return navigator.mediaDevices.getUserMedia(micConstraints(null));
+  });
+
+// Device ids are empty until mic permission is granted, so those are skipped
+const listAudioDevices = async () => {
+  const list = await navigator.mediaDevices.enumerateDevices();
+  return {
+    inputs:  list.filter(d => d.kind === 'audioinput'  && d.deviceId),
+    outputs: list.filter(d => d.kind === 'audiooutput' && d.deviceId),
+  };
+};
+
+const canPickSpeaker = typeof HTMLMediaElement !== 'undefined' && 'setSinkId' in HTMLMediaElement.prototype;
+
+// Reads RTT / packet loss / jitter for one peer. `prev` holds the previous
+// cumulative packet counters so loss is measured over the last interval only.
+const readPeerStats = async (pc, prev) => {
+  const report = await pc.getStats();
+  let transport, pair;
+  let lost = 0, received = 0, jitter = 0;
+  report.forEach(s => {
+    if (s.type === 'transport') transport = s;
+    else if (s.type === 'candidate-pair' && (s.selected || (s.nominated && s.state === 'succeeded'))) pair = s;
+    else if (s.type === 'inbound-rtp' && s.kind === 'audio') {
+      lost     += s.packetsLost     || 0;
+      received += s.packetsReceived || 0;
+      jitter    = Math.max(jitter, s.jitter || 0);
+    }
+  });
+  if (transport?.selectedCandidatePairId) pair = report.get(transport.selectedCandidatePairId) || pair;
+
+  const dLost = lost - (prev?.lost ?? 0);
+  const dRecv = received - (prev?.received ?? 0);
+  return {
+    state:  pc.iceConnectionState,
+    rtt:    pair?.currentRoundTripTime != null ? Math.round(pair.currentRoundTripTime * 1000) : null,
+    loss:   dLost + dRecv > 0 ? Math.max(0, (dLost / (dLost + dRecv)) * 100) : 0,
+    jitter: Math.round(jitter * 1000),
+    counters: { lost, received },
+  };
+};
+
+const rateConnection = (s) => {
+  if (!s) return null;
+  if (s.state === 'failed' || s.state === 'disconnected') return 'poor';
+  if (s.rtt == null) return null;
+  if (s.rtt < 150 && s.loss < 2 && s.jitter < 30) return 'good';
+  if (s.rtt < 300 && s.loss < 5 && s.jitter < 60) return 'fair';
+  return 'poor';
+};
+
+function SignalBars({ stats }) {
+  const quality = rateConnection(stats);
+  const level   = { good: 3, fair: 2, poor: 1 }[quality] ?? 0;
+  const color   = { good: 'bg-emerald-400', fair: 'bg-amber-400', poor: 'bg-red-400' }[quality];
+  const title   = !stats ? 'Connecting…'
+    : stats.rtt == null ? `Connection: ${stats.state}`
+    : `Ping ${stats.rtt} ms · Loss ${stats.loss.toFixed(1)}% · Jitter ${stats.jitter} ms`;
+
+  return (
+    <div className="ml-auto flex items-center gap-1.5" title={title}>
+      {stats?.rtt != null && (
+        <span className="text-[10px] text-white/25 tabular-nums">{stats.rtt} ms</span>
+      )}
+      <div className="flex items-end gap-[2px] h-3">
+        {[4, 8, 12].map((h, i) => (
+          <div key={h} className={`w-[3px] rounded-full ${i < level ? color : 'bg-white/10'}`} style={{ height: h }}/>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function DeviceSelect({ label, value, devices, onChange }) {
+  return (
+    <label className="block">
+      <span className="block text-xs text-white/25 mb-1">{label}</span>
+      <select
+        value={devices.some(d => d.deviceId === value) ? value : ''}
+        onChange={e => onChange(e.target.value)}
+        className="w-full bg-white/5 border border-white/8 rounded-lg px-2.5 py-1.5 text-xs text-white/70 focus:outline-none focus:border-white/20 transition-colors cursor-pointer"
+      >
+        <option value="" className="bg-[#1a1a1a]">System default</option>
+        {devices.map((d, i) => (
+          <option key={d.deviceId} value={d.deviceId} className="bg-[#1a1a1a]">
+            {d.label || `${label} ${i + 1}`}
+          </option>
+        ))}
+      </select>
+    </label>
+  );
+}
 
 export default function App() {
   const savedUsername = localStorage.getItem('voiceapp_username') || '';
@@ -22,6 +157,11 @@ export default function App() {
   const [isNoiseCancellationEnabled, setIsNoiseCancellationEnabled] = useState(true);
   const [noiseReductionLevel, setNoiseReductionLevel] = useState(0.8);
   const [socketId, setSocketId]   = useState(null);
+  const [audioInputs, setAudioInputs]   = useState([]);
+  const [audioOutputs, setAudioOutputs] = useState([]);
+  const [selectedMic, setSelectedMic]         = useState(localStorage.getItem('voiceapp_mic') || '');
+  const [selectedSpeaker, setSelectedSpeaker] = useState(localStorage.getItem('voiceapp_speaker') || '');
+  const [peerStats, setPeerStats] = useState({}); // userId -> { rtt, loss, jitter, state }
 
   const socketRef           = useRef();
   const streamRef           = useRef();
@@ -37,7 +177,11 @@ export default function App() {
   const remoteVideoRef      = useRef();
   const gainNodeRef         = useRef();
   const processorRef        = useRef();
-  const viewRef             = useRef(view);
+  const dfCoreRef           = useRef(null); // set while the DeepFilterNet node is active
+  const sourceRef           = useRef(null); // mic source node; swapped on device change
+  const speakerRef          = useRef(selectedSpeaker);
+  const statsCountersRef    = useRef({});   // userId -> cumulative packet counters
+  const viewRef            = useRef(view);
   const joinRoomRef         = useRef(null);
   const leaveRoomRef        = useRef(null);
   useEffect(() => { viewRef.current = view; }, [view]);
@@ -105,6 +249,8 @@ export default function App() {
             audio = new Audio();
             audio.autoplay = true;
             remoteAudioRef.current[key] = audio;
+            if (canPickSpeaker && speakerRef.current)
+              audio.setSinkId(speakerRef.current).catch(() => {});
           }
           audio.srcObject = new MediaStream([track]);
           audio.play().catch(() => {});
@@ -194,6 +340,78 @@ export default function App() {
       streamRef.current.getAudioTracks().forEach(t => { t.enabled = !isMuted; });
   }, [isMuted]);
 
+  // ── Audio devices ─────────────────────────────────────────────────────────
+  useEffect(() => {
+    const md = navigator.mediaDevices;
+    if (!md?.enumerateDevices) return;
+    const refresh = () => listAudioDevices().then(({ inputs, outputs }) => {
+      setAudioInputs(inputs);
+      setAudioOutputs(outputs);
+    }).catch(() => {});
+    refresh();
+    md.addEventListener('devicechange', refresh);
+    return () => md.removeEventListener('devicechange', refresh);
+  }, [view]); // re-list after joining a room: labels appear once mic permission is granted
+
+  const switchMic = async (deviceId) => {
+    setSelectedMic(deviceId);
+    localStorage.setItem('voiceapp_mic', deviceId);
+    const ctx = audioContextRef.current;
+    if (!ctx || ctx.state === 'closed' || !gainNodeRef.current) return;
+
+    try {
+      const stream = await getMicStream(deviceId);
+      stream.getAudioTracks().forEach(t => { t.enabled = !isMuted; });
+      if (!dfCoreRef.current)
+        stream.getAudioTracks()[0]?.applyConstraints({ noiseSuppression: true }).catch(() => {});
+
+      // Only the source node changes; the processed track sent to peers
+      // stays the same, so no renegotiation is needed.
+      const source = ctx.createMediaStreamSource(stream);
+      sourceRef.current?.disconnect();
+      source.connect(gainNodeRef.current);
+      streamRef.current?.getTracks().forEach(t => t.stop());
+      streamRef.current = stream;
+      sourceRef.current = source;
+    } catch (err) {
+      console.error('Mic switch failed:', err);
+      alert('Could not switch microphone.');
+    }
+  };
+
+  const switchSpeaker = (deviceId) => {
+    setSelectedSpeaker(deviceId);
+    speakerRef.current = deviceId;
+    localStorage.setItem('voiceapp_speaker', deviceId);
+    Object.values(remoteAudioRef.current).forEach(a => a.setSinkId(deviceId).catch(() => {}));
+  };
+
+  // ── Connection quality ────────────────────────────────────────────────────
+  useEffect(() => {
+    if (view !== 'room') return;
+    const id = setInterval(async () => {
+      const entries = await Promise.all(
+        Object.entries(peersRef.current).map(async ([userId, pc]) => {
+          try { return [userId, await readPeerStats(pc, statsCountersRef.current[userId])]; }
+          catch { return null; }
+        })
+      );
+      const next = {};
+      const counters = {};
+      entries.filter(Boolean).forEach(([userId, s]) => {
+        counters[userId] = s.counters;
+        next[userId] = { rtt: s.rtt, loss: s.loss, jitter: s.jitter, state: s.state };
+      });
+      statsCountersRef.current = counters;
+      setPeerStats(next);
+    }, 2000);
+    return () => {
+      clearInterval(id);
+      statsCountersRef.current = {};
+      setPeerStats({});
+    };
+  }, [view]);
+
   // ── Room actions ──────────────────────────────────────────────────────────
   const handleSetUsername = (e) => {
     e.preventDefault();
@@ -257,17 +475,7 @@ export default function App() {
     setMessages([]);
     setUsers([]);
 
-    navigator.mediaDevices.getUserMedia({
-      audio: {
-        echoCancellation: true,
-        noiseSuppression: isNoiseCancellationEnabled,
-        autoGainControl: true,
-        channelCount: 1,
-        sampleRate: 48000,
-        sampleSize: 16,
-      },
-      video: false,
-    })
+    getMicStream(selectedMic)
       .then(async stream => {
         streamRef.current = stream;
 
@@ -285,6 +493,7 @@ export default function App() {
         audioContextRef.current    = audioContext;
         analyserRef.current        = analyser;
         gainNodeRef.current        = gainNode;
+        sourceRef.current          = source;
 
         gainNode.gain.value = 0.95; // Prevent clipping
 
@@ -295,26 +504,27 @@ export default function App() {
           middleNode.connect(dest);
         };
 
-        if (isNoiseCancellationEnabled) {
-          try {
-            await audioContext.audioWorklet.addModule('/rnnoise-processor.js');
-            const rnnoiseNode = new AudioWorkletNode(audioContext, 'rnnoise-processor', {
-              numberOfInputs: 1,
-              numberOfOutputs: 1,
-              outputChannelCount: [1],
-            });
-            processorRef.current = rnnoiseNode;
-            connectChain(rnnoiseNode);
-          } catch (err) {
-            console.warn('[RNNoise] AudioWorklet failed, using fallback gate:', err);
+        // DeepFilterNet3 is always inserted so the toggle can bypass it live
+        try {
+          const core   = await getDeepFilterCore();
+          const dfNode = await core.createAudioWorkletNode(audioContext);
+          core.setSuppressionLevel(toAttenDb(noiseReductionLevel));
+          core.setNoiseSuppressionEnabled(isNoiseCancellationEnabled);
+          dfCoreRef.current    = core;
+          processorRef.current = dfNode;
+          connectChain(dfNode);
+        } catch (err) {
+          console.warn('[DeepFilterNet] init failed, using browser NS + fallback gate:', err);
+          stream.getAudioTracks()[0]?.applyConstraints({ noiseSuppression: true }).catch(() => {});
+          if (isNoiseCancellationEnabled) {
             const sp = buildFallbackGate(audioContext);
             processorRef.current = sp;
             connectChain(sp);
+          } else {
+            source.connect(gainNode);
+            gainNode.connect(analyser);
+            gainNode.connect(dest);
           }
-        } else {
-          source.connect(gainNode);
-          gainNode.connect(analyser);
-          gainNode.connect(dest);
         }
 
         processedStreamRef.current = dest.stream;
@@ -369,6 +579,9 @@ export default function App() {
     if (animationFrameRef.current) cancelAnimationFrame(animationFrameRef.current);
     processorRef.current?.disconnect();
     processorRef.current = null;
+    dfCoreRef.current = null;
+    sourceRef.current?.disconnect();
+    sourceRef.current = null;
     gainNodeRef.current?.disconnect();
     gainNodeRef.current = null;
     processedStreamRef.current?.getTracks().forEach(t => t.stop());
@@ -384,6 +597,14 @@ export default function App() {
     setMessages([]);
     socketRef.current.emit('get-rooms');
   };
+
+  // Push toggle/slider changes to the running DeepFilterNet node
+  useEffect(() => {
+    dfCoreRef.current?.setNoiseSuppressionEnabled(isNoiseCancellationEnabled);
+  }, [isNoiseCancellationEnabled]);
+  useEffect(() => {
+    dfCoreRef.current?.setSuppressionLevel(toAttenDb(noiseReductionLevel));
+  }, [noiseReductionLevel]);
 
   useEffect(() => { joinRoomRef.current  = joinRoom; });
   useEffect(() => { leaveRoomRef.current = leaveRoom; });
@@ -670,9 +891,9 @@ export default function App() {
                         )}
                       </div>
                       <span className="text-sm text-white/80">{u.name}</span>
-                      {u.id === socketId && (
-                        <span className="ml-auto text-[10px] text-white/25">you</span>
-                      )}
+                      {u.id === socketId
+                        ? <span className="ml-auto text-[10px] text-white/25">you</span>
+                        : <SignalBars stats={peerStats[u.id]}/>}
                     </div>
                   ))}
                 </div>
@@ -692,6 +913,13 @@ export default function App() {
                       style={{ width: `${isMuted ? 0 : micLevel}%` }}
                     />
                   </div>
+                </div>
+
+                <div className="space-y-2.5 mb-4">
+                  <DeviceSelect label="Microphone" value={selectedMic} devices={audioInputs} onChange={switchMic}/>
+                  {canPickSpeaker && (
+                    <DeviceSelect label="Speaker" value={selectedSpeaker} devices={audioOutputs} onChange={switchSpeaker}/>
+                  )}
                 </div>
 
                 <div className="space-y-2">

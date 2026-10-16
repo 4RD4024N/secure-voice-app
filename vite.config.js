@@ -31,10 +31,10 @@ export default defineConfig({
     strictPort: false,
     cors: true,
     allowedHosts: true, // Allow any host - critical for ngrok
+    // HMR websocket shares the 5173 server (no separate hmr.port), so it goes
+    // through the same ngrok tunnel. The browser connects on 443 via ngrok;
+    // on plain localhost Vite falls back to a direct connection to 5173.
     hmr: {
-      protocol: 'wss',
-      host: undefined,
-      port: 443,
       clientPort: 443,
     },
     watch: {
